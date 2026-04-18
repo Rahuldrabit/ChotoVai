@@ -269,7 +269,7 @@ class AgentFSM:
     ) -> tuple[str, list[str]]:
         """Route through the adversarial DebateGraph."""
         from src.orchestrator.debate_graph import DebateGraph
-        from src.fine_tuning.debate_collector import DebateTraceCollector
+        # from src.fine_tuning.debate_collector import DebateTraceCollector
 
         state.fsm_state = FSMState.DEBATING
         graph = DebateGraph()
@@ -282,12 +282,12 @@ class AgentFSM:
         state.debate_history.append(debate)
         state.active_debate = None
 
-        # Async trace collection for IMAGINE (fire-and-forget, not on hot path)
-        try:
-            collector = DebateTraceCollector()
-            collector.record(debate)
-        except Exception as exc:
-            logger.warning("fsm.debate_trace_error", error=str(exc))
+        # # Async trace collection for IMAGINE (fire-and-forget, not on hot path)
+        # try:
+        #     collector = DebateTraceCollector()
+        #     collector.record(debate)
+        # except Exception as exc:
+        #     logger.warning("fsm.debate_trace_error", error=str(exc))
 
         # Post-debate deterministic validation (composite)
         validation_results = self._verify(path=".", run_tests=False)
