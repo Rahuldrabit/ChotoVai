@@ -61,11 +61,12 @@ Rules:
    - "doc_reader" — read documentation
 4. Provide 1–3 concrete `success_criteria` per node (how we know the node is done).
 5. Set `cognitive_strategy` for each node:
-   - "debate"   — complex or security-critical code (uses adversarial Coder↔Critic loop)
-   - "refine"   — medium complexity (one critic improvement pass)
-   - "direct"   — simple, read-only, or mechanical tasks (single-shot)
-   - "verify"   — test-focused nodes that need deterministic validation
-   - "escalate" — known hard problems that require frontier model reasoning
+   - "debate"    — complex or security-critical code (uses adversarial Coder↔Critic loop)
+   - "refine"    — medium complexity (one critic improvement pass)
+   - "direct"    — simple, read-only, or mechanical tasks (single-shot)
+   - "verify"    — test-focused nodes that need deterministic validation
+   - "escalate"  — known hard problems that require frontier model reasoning
+   - "decompose" — node covers too many concerns; the executor will split it into subtasks at runtime
 6. Output ONLY valid JSON matching the schema — no explanations, no markdown.
 
 Node IDs must be short strings: "N1", "N2", etc.

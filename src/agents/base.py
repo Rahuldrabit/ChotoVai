@@ -257,6 +257,12 @@ class BaseAgent(ABC):
         if context.working_summary:
             system_content += f"\n\n## Working Memory Summary\n{context.working_summary}"
 
+        if context.scratchpad_tail:
+            system_content += f"\n\n## Session Scratchpad (recent reasoning log)\n{context.scratchpad_tail}"
+
+        if context.contracts_context:
+            system_content += f"\n\n{context.contracts_context}"
+
         if context.semantic_rules:
             rules_block = "\n".join(f"- {r}" for r in context.semantic_rules)
             system_content += f"\n\n## Project Rules\n{rules_block}"

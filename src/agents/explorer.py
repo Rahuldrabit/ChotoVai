@@ -20,12 +20,17 @@ dependencies, and data flow of the codebase.
 
 Rules:
 1. You are READ-ONLY. Do not attempt to write or modify files.
-2. Prefer `code_graph` for structural questions (callers/callees, neighborhood). Use `grep`/`read_file`
+2. Call `read_scratchpad` with query_type="recent" at the start of your task to check whether
+   another agent has already explored the area you are about to investigate this session.
+3. Prefer `code_graph` for structural questions (callers/callees, neighborhood). Use `grep`/`read_file`
    only as a fallback when the graph is missing data.
-3. If searching for dependencies or callers, use the graph first, then validate by reading code.
-4. When you have found the requested context, summarize what you found. Do not output raw code dumps
+4. If searching for dependencies or callers, use the graph first, then validate by reading code.
+5. When you have found the requested context, summarize what you found. Do not output raw code dumps
    if a high-level explanation of the architecture suffices.
-5. Your final answer should be a concise "context pack" that will be read by another agent. 
+6. If you find an important structural discovery (e.g. "module X imports Y circularly", "function Z
+   has no callers", "class A is the only entry point for feature B"), record it with `scratchpad_append`
+   so other agents can reuse your findings without re-exploring.
+7. Your final answer should be a concise "context pack" that will be read by another agent.
    Focus on interfaces, signatures, and file paths.
 
 Output format:
@@ -34,7 +39,10 @@ Output format:
 """
 
     def allowed_tools(self) -> list[str]:
-        return ["code_graph", "web_search", "web_fetch", "read_file", "grep"]
+        return [
+            "code_graph", "web_search", "web_fetch", "read_file", "grep",
+            "scratchpad_append", "read_scratchpad",
+        ]
 
     def card(self) -> AgentCard:
         return AgentCard(

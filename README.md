@@ -1,57 +1,108 @@
-# SLM-First Coding Agent System
+# ChotoVai — SLM-First Coding Agent System
 
-This repository contains the reference implementation of an SLM-First (Small Language Model) Coding Agent System as described in the architectural report.
-
-It demonstrates how to scaffold small, open-weight models (like Qwen2.5-Coder 7B) into a robust, deterministic execution loop (TAOR), enabling them to perform complex coding tasks that typically require much larger frontier models.
+A multi-agent coding assistant that scaffolds small open-weight models (Qwen2.5-Coder 7B, Llama-3-8B) into a robust, deterministic execution loop capable of handling complex software engineering tasks — without requiring frontier-model access.
 
 ## Phase Delivery
 
-Currently implemented: **Phase 6 Multi-Path Reasoning**
-- Phase 0: Foundation (schemas, config, tracing, vllm client)
-- Phase 1: Single-Agent Baseline (BaseAgent, MCP tools: read, write, grep, shell, tests)
-- Phase 2: Memory Layer (working buffer, episodic store, plan state, context assembler)
-- Phase 3: Orchestrator & FSM (Planner, Deterministic validators, FSM, CLI)
-- Phase 4: Multi-Agent Swarm (Specialized Tester, Explorer, Critic, Coder)
-- Phase 5: Adversarial SLM Debate (Debate Graph loops, Cognitive Router, Escalation)
-- Phase 6: Multi-Path Reasoning (Tree of Thoughts for Intent/Planning, Graph of Thoughts for Debate)
+Currently implemented: **Phase 8 — External Blackboard Memory**
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 0 | Foundation — schemas, config, tracing, vLLM client | ✓ |
+| 1 | Single-Agent Baseline — BaseAgent, MCP tools (read, write, grep, shell, tests) | ✓ |
+| 2 | Memory Layer — working buffer, episodic store, plan state, context assembler | ✓ |
+| 3 | Orchestrator & FSM — Planner, deterministic validators, FSM, CLI | ✓ |
+| 4 | Multi-Agent Swarm — specialized Tester, Explorer, Critic, Coder, Refactorer | ✓ |
+| 5 | Adversarial SLM Debate — debate graph loops, cognitive router, escalation | ✓ |
+| 6 | Multi-Path Reasoning — Tree of Thoughts for intent/planning, Graph of Thoughts for debate | ✓ |
+| 7 | Dynamic Node Decomposition — broad goals auto-split into atomic subtasks at runtime | ✓ |
+| 8 | External Blackboard Memory — session scratchpad + code contracts shared across all agents | ✓ |
+
+**Also available:** VS Code extension (`chotovai-vscode/`) wrapping the agent system as a sidebar chat panel.
+
+---
 
 ## Getting Started
 
-1. Set up dependencies using `uv` (or pip):
-   ```bash
-   uv venv
-   # Depending on your platform, you might activate the venv here
-   uv pip install -e .
-   ```
+### 1. Install dependencies
 
-2. Start the infrastructure (Postgres, Qdrant):
-   ```bash
-   docker-compose -f infra/docker-compose.yml up -d postgres qdrant
-   ```
+```bash
+uv venv && source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+uv pip install -e .
+```
 
-3. Configure your endpoint in `.env`:
-   ```bash
-   cp .env.example .env
-   # Edit .env to point to your local vLLM / Ollama or OpenRouter endpoints
-   ```
+### 2. Start infrastructure
 
-4. Run the CLI Interactive Mode:
-   ```bash
-   slm-agent repl
-   ```
-   Or run a single task:
-   ```bash
-   slm-agent run "Add a sum_list function to utils.py"
-   ```
+```bash
+docker-compose -f infra/docker-compose.yml up -d postgres qdrant
+```
+
+### 3. Configure endpoints
+
+```bash
+cp .env.example .env
+# Edit .env — point VLLM_BASE_URL at your local vLLM / Ollama server
+# Set OPENROUTER_API_KEY for frontier-model escalation (optional)
+```
+
+### 4. Run
+
+```bash
+# Interactive REPL
+slm-agent repl
+
+# Single task
+slm-agent run "Add a retry decorator to utils.py"
+```
+
+### VS Code Extension
+
+```bash
+cd chotovai-vscode
+npm install
+npm run compile        # or: node esbuild.js --watch
+# Press F5 in VS Code to launch the extension host
+```
+
+The extension communicates with `bridge.py` over subprocess NDJSON — no HTTP server required.
+
+---
+
+## Project Layout
+
+```
+src/
+  core/           Pydantic schemas, config, OpenTelemetry tracing
+  serving/        OpenAI-compatible inference client (vLLM / Ollama / OpenRouter)
+  agents/         Specialist swarm — Coder, Critic, Tester, Explorer, Refactorer, Summarizer
+  memory/         Memory layers: episodic, scratchpad, contracts, context assembler
+  orchestrator/   FSM, Planner, CognitiveRouter, DebateGraph, NodeDecomposer, Escalation
+  validators/     Deterministic checks (ruff, pyright, pytest) + agentic ensemble
+  protocols/      MCP client — tool registry and approval gating
+  repo_intel/     Code graph, GraphRAG, community detection
+  fine_tuning/    Debate trace collector + imagine trainer (decoupled from orchestration)
+
+tools/            MCP tool implementations (read_file, write_file, grep, shell, git, …)
+chotovai-vscode/  VS Code extension — sidebar chat panel + subprocess bridge
+bridge.py         NDJSON bridge between VS Code extension and AgentFSM
+```
+
+---
+
+## Key Design Decisions
+
+**SLMs, not frontier models** — every agent targets 7–9B parameter models. Reliability comes from deterministic feedback loops, not model scale.
+
+**External Blackboard** — a per-session `scratchpad.md` (append-only reasoning log) and `contracts.json` (JSON symbol table) live outside the LLM context window. All agents read a tail/compact summary at invocation time and write back via `scratchpad_append`, `contracts_update`, and `read_scratchpad` MCP tools. This lets a chain of agents share state across a long session without any single call exceeding the context limit.
+
+**Dynamic Decomposition** — the `CognitiveRouter` detects broad nodes (>80-word description, >3 success criteria, or multi-concept title) and routes them through `NodeDecomposer`, which calls the planner model to split the node into 2–5 atomic child nodes injected live into the running DAG.
+
+**Adversarial Debate** — the Coder and Critic run in a game-theoretic loop until the Critic scores the output ≥ threshold or retries are exhausted. The ensemble validator runs N critics in parallel and escalates to a frontier model when judges disagree.
+
+**Fine-tuning decoupled** — debate traces are collected by `DebateTraceCollector` but the fine-tuning pipeline is intentionally disabled in the orchestration loop so it does not affect latency or correctness of the agent run.
+
+---
 
 ## Architecture
 
-For a detailed dive into the system design, read the [Architecture Guide](ARCHITECTURE.md).
-
-- `src/core/`: Pydantic schemas, config, and OpenTelemetry tracing
-- `src/serving/`: Unifies model inference via OpenAI-compatible endpoints (vLLM support)
-- `src/agents/`: Specialist swarm (Coder, Critic, Tester, Explorer, etc.) inheriting from `BaseAgent`.
-- `src/memory/`: 5-layer memory (Working, Plan state, Episodic, Semantic, Procedural)
-- `src/orchestrator/`: `planner.py`, `fsm.py`, `debate_graph.py`, and `cognitive_router.py` for control flow
-- `src/validators/`: Deterministic checks (ruff, pyright, pytest)
-- `tools/`: MCP tool implementations
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design including component diagrams, memory layer detail, and execution flow walkthrough.

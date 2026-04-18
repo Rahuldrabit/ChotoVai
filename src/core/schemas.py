@@ -150,6 +150,7 @@ class PlanNode(BaseModel):
     retry_count: int = 0
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    parent_node_id: str | None = None  # Set when created by NodeDecomposer
 
 
 class TaskDAG(BaseModel):
@@ -171,6 +172,41 @@ class TaskDAG(BaseModel):
             if n.status == NodeStatus.PENDING
             and all(dep in complete_ids for dep in n.depends_on)
         ]
+
+    def decompose_node(self, parent_id: str, children: list["PlanNode"]) -> None:
+        """
+        Inject child nodes into the DAG in place of a broad parent node.
+
+        - Children inherit the parent's upstream depends_on
+        - Each subsequent child depends on the previous one (sequential by default)
+        - Every downstream node that depended on parent_id is rewired to depend on
+          the last child instead, ensuring correct execution order
+        - The parent node is left in-place; the caller is responsible for marking
+          it COMPLETE immediately after calling this method
+        """
+        parent = next(n for n in self.nodes if n.id == parent_id)
+        last_child_id = children[-1].id
+
+        for i, child in enumerate(children):
+            child.parent_node_id = parent_id
+            if i == 0:
+                # First child inherits the parent's upstream deps
+                child.depends_on = list(parent.depends_on)
+            else:
+                # Each subsequent child depends on the previous child
+                child.depends_on = [children[i - 1].id]
+
+        # Rewire downstream nodes: swap parent_id → last child id
+        for node in self.nodes:
+            if parent_id in node.depends_on:
+                node.depends_on = [
+                    last_child_id if d == parent_id else d
+                    for d in node.depends_on
+                ]
+
+        # Insert children immediately after the parent in the node list
+        idx = next(i for i, n in enumerate(self.nodes) if n.id == parent_id)
+        self.nodes[idx + 1:idx + 1] = children
 
     def is_complete(self) -> bool:
         return all(n.status in (NodeStatus.COMPLETE, NodeStatus.SKIPPED) for n in self.nodes)
@@ -200,7 +236,9 @@ class ContextPack(BaseModel):
     code_snippets: list[CodeSnippet] = Field(default_factory=list)
     episodic_summaries: list[str] = Field(default_factory=list)
     semantic_rules: list[str] = Field(default_factory=list)
-    working_summary: str | None = None   # Compressed working memory
+    working_summary: str | None = None      # Compressed working memory
+    scratchpad_tail: str | None = None      # Last ~4K chars of session scratchpad
+    contracts_context: str | None = None    # Compact symbol table from ContractStore
     total_tokens: int = 0
 
 

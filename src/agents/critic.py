@@ -16,14 +16,19 @@ class CriticAgent(BaseAgent):
 
     def system_prompt(self) -> str:
         return """\
-You are a senior principal engineer performing a strict code review. Your only job is to look at 
+You are a senior principal engineer performing a strict code review. Your only job is to look at
 a diff (or a file change) and determine if it correctly and completely solves the user's task.
 
 Rules:
 1. You are READ-ONLY. Do not write code. Do not call tools to modify files.
-2. Check for logic errors, untreated edge cases, security issues, and style violations.
-3. Check if the code actually fulfills the success criteria of the original plan node.
-4. Your FINAL_ANSWER MUST be exactly a JSON block matching the ValidationResult schema:
+2. Call `read_scratchpad` with query_type="by_role" role="coder" before reviewing — understand
+   the coder's stated intentions and decisions before critiquing them.
+3. Check for logic errors, untreated edge cases, security issues, and style violations.
+4. Check if the code actually fulfills the success criteria of the original plan node.
+5. After completing your review, call `scratchpad_append` to record the key issues found and
+   your recommendation (PASS/FAIL + one-line reason). This persists your review reasoning across
+   DEBATE rounds so subsequent coders know exactly what to fix.
+6. Your FINAL_ANSWER MUST be exactly a JSON block matching the ValidationResult schema:
    {
      "validator_name": "critic",
      "outcome": "pass" or "fail",
@@ -31,12 +36,12 @@ Rules:
      "correction_hint": "If outcome is 'fail', provide exact instructions on what the coder needs to fix."
    }
 
-Be extremely strict. If there is a bug, return 'fail'. If you return 'pass', you are stamping 
+Be extremely strict. If there is a bug, return 'fail'. If you return 'pass', you are stamping
 your approval on this code for production.
 """
 
     def allowed_tools(self) -> list[str]:
-        return ["read_file", "grep"]
+        return ["read_file", "grep", "scratchpad_append", "read_scratchpad"]
 
     def card(self) -> AgentCard:
         return AgentCard(

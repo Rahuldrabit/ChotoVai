@@ -24,6 +24,12 @@ import structlog
 from src.core.config import get_config
 from src.core.schemas import AgentRole, AgentState, CognitiveStrategy, PlanNode
 
+# Multi-concept conjunctions that signal a node covers too many concerns
+_MULTI_CONCEPT_PATTERN = re.compile(
+    r"\b(and|including|as well as|with support for|also|plus|alongside)\b",
+    re.IGNORECASE,
+)
+
 logger = structlog.get_logger(__name__)
 
 # Keyword patterns that signal high complexity → trigger DEBATE
@@ -73,7 +79,16 @@ class CognitiveRouter:
             )
             return node.cognitive_strategy
 
-        # 2. High retry count → model is stuck → escalate immediately
+        # 2. Node is too broad AND is a top-level node (not already a decomposed child)
+        if node.parent_node_id is None and self._is_too_broad(node):
+            logger.info(
+                "cognitive_router.decompose_broad_node",
+                node_id=node.id,
+                title=node.title,
+            )
+            return CognitiveStrategy.DECOMPOSE
+
+        # 3. High retry count → model is stuck → escalate immediately
         if node.retry_count >= self._cfg.retry_limit - 1:
             logger.info(
                 "cognitive_router.escalate_high_retries",
@@ -82,12 +97,12 @@ class CognitiveRouter:
             )
             return CognitiveStrategy.ESCALATE
 
-        # 3. Read-only roles → always DIRECT (no debate overhead)
+        # 4. Read-only roles → always DIRECT (no debate overhead)
         role = node.assigned_role or AgentRole.CODER
         if role in _READ_ONLY_ROLES:
             return CognitiveStrategy.DIRECT
 
-        # 4. Code-producing roles + debate enabled → DEBATE or REFINE
+        # 5. Code-producing roles + debate enabled → DEBATE or REFINE
         if role in _CODE_PRODUCING_ROLES and self._cfg.debate_enabled:
             if self._is_complex(node):
                 logger.info(
@@ -99,11 +114,11 @@ class CognitiveRouter:
             # Simple code task but still benefits from one critic pass
             return CognitiveStrategy.DEBATE
 
-        # 5. TESTER role → VERIFY (run deterministic checks after generation)
+        # 6. TESTER role → VERIFY (run deterministic checks after generation)
         if role == AgentRole.TESTER:
             return CognitiveStrategy.VERIFY
 
-        # 6. CRITIC role standalone → DIRECT (it IS the review)
+        # 7. CRITIC role standalone → DIRECT (it IS the review)
         if role == AgentRole.CRITIC:
             return CognitiveStrategy.DIRECT
 
@@ -121,5 +136,29 @@ class CognitiveRouter:
             return True
         # Long description → likely complex
         if len(node.description.split()) > 60:
+            return True
+        return False
+
+    def _is_too_broad(self, node: PlanNode) -> bool:
+        """
+        Heuristic: is this node too broad for a single agent pass?
+        Triggers DECOMPOSE so the FSM splits it into atomic subtasks at runtime.
+        """
+        # Planner explicitly requested decomposition
+        if node.cognitive_strategy == CognitiveStrategy.DECOMPOSE:
+            return True
+        # Read-only and test roles are inherently narrow — never decompose
+        role = node.assigned_role or AgentRole.CODER
+        if role in _READ_ONLY_ROLES or role == AgentRole.TESTER:
+            return False
+        # Very long description signals too many concerns packed into one node
+        word_count = len(node.description.split())
+        if word_count > 80:
+            return True
+        # Too many success criteria → the node is trying to do too much
+        if len(node.success_criteria) > 3:
+            return True
+        # Title contains multi-concept conjunctions (e.g. "implement X and Y and Z")
+        if len(_MULTI_CONCEPT_PATTERN.findall(node.title)) >= 2:
             return True
         return False

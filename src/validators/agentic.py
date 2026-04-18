@@ -148,6 +148,22 @@ class AgenticValidator:
             outcome=outcome.value,
         )
 
+        # ── Write verdict to session scratchpad ───────────────────────
+        try:
+            from src.memory.scratchpad import get_active_scratchpad
+            sp = get_active_scratchpad()
+            if sp is not None:
+                node_id = getattr(getattr(context_pack, "plan_node", None), "id", "unknown")
+                issues_preview = "; ".join(hints[:2]) if hints else "none"
+                sp.append(
+                    f"Validation {outcome.value.upper()} — mean score {verdict.mean_score}/10 "
+                    f"(scores: {scores}) — issues: {issues_preview}",
+                    role="critic",
+                    node_id=node_id,
+                )
+        except Exception:
+            pass  # Never let scratchpad writes break validation flow
+
         # ── Confidence-drop escalation ─────────────────────────────────
         if confidence < self._cfg.debate_ensemble_confidence_threshold:
             logger.info(

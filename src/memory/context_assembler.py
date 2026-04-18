@@ -24,6 +24,8 @@ from src.core.schemas import (
     ValidationOutcome,
 )
 from src.memory.episodic import EpisodicStore
+from src.memory.scratchpad import SessionScratchpad
+from src.memory.contracts import ContractStore
 
 logger = structlog.get_logger(__name__)
 
@@ -34,8 +36,15 @@ class ContextAssembler:
     Pass in optional components; missing ones are silently omitted.
     """
 
-    def __init__(self, episodic_store: EpisodicStore | None = None) -> None:
+    def __init__(
+        self,
+        episodic_store: EpisodicStore | None = None,
+        scratchpad: SessionScratchpad | None = None,
+        contracts: ContractStore | None = None,
+    ) -> None:
         self._episodic = episodic_store
+        self._scratchpad = scratchpad
+        self._contracts = contracts
         self._cfg = get_config().memory
 
     async def assemble(
@@ -103,6 +112,22 @@ class ContextAssembler:
                             language=snippet.language,
                         ))
 
+        # Inject scratchpad tail (last ~4K chars of session reasoning log)
+        scratchpad_tail: str | None = None
+        if self._scratchpad:
+            tail = self._scratchpad.read_tail(max_chars=4000)
+            if tail:
+                scratchpad_tail = tail
+                used_chars += len(tail)
+
+        # Inject compact symbol table (contracts) — all roles benefit from this
+        contracts_context: str | None = None
+        if self._contracts:
+            compact = self._contracts.get_all_compact()
+            if compact:
+                contracts_context = compact
+                used_chars += len(compact)
+
         pack = ContextPack(
             agent_role=role,
             plan_node=plan_node,
@@ -110,6 +135,8 @@ class ContextAssembler:
             episodic_summaries=episodic_summaries,
             semantic_rules=filtered_rules,
             working_summary=working_summary,
+            scratchpad_tail=scratchpad_tail,
+            contracts_context=contracts_context,
             total_tokens=used_chars // 4,
         )
 

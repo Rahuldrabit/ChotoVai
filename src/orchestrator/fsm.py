@@ -31,8 +31,10 @@ from src.core.schemas import (
     ValidationResult,
 )
 from src.memory.context_assembler import ContextAssembler
+from src.memory.contracts import ContractStore, set_active_contracts
 from src.memory.episodic import EpisodicStore
 from src.memory.plan_state import PlanState
+from src.memory.scratchpad import SessionScratchpad, set_active_scratchpad
 from src.orchestrator.cognitive_router import CognitiveRouter
 from src.orchestrator.planner import Planner
 from src.validators.deterministic import DeterministicValidator
@@ -59,8 +61,11 @@ class AgentFSM:
         self._validator = DeterministicValidator()
         self._episodic = EpisodicStore()
         self._plan_state = PlanState(data_dir=self._data_dir)
-        self._context_assembler = ContextAssembler(episodic_store=self._episodic)
         self._cognitive_router = CognitiveRouter()
+        # Scratchpad and contracts are initialised per-session in run()
+        self._scratchpad: SessionScratchpad | None = None
+        self._contracts: ContractStore | None = None
+        self._context_assembler = ContextAssembler(episodic_store=self._episodic)
 
     async def run(self, goal: str) -> AsyncIterator[dict]:
         """
@@ -73,6 +78,21 @@ class AgentFSM:
         budget = TokenBudget(total_limit=self._cfg.max_total_tokens)
         state = AgentState(user_goal=goal, budget=budget)
         self._checkpoint(state)
+
+        # ── Per-session external memory (scratchpad + contracts) ──────────
+        session_dir = self._data_dir / "sessions" / str(state.session_id)
+        self._scratchpad = set_active_scratchpad(session_dir)
+        self._contracts = set_active_contracts(session_dir)
+        self._context_assembler = ContextAssembler(
+            episodic_store=self._episodic,
+            scratchpad=self._scratchpad,
+            contracts=self._contracts,
+        )
+        self._scratchpad.append(
+            f"Session started.\nGoal: {goal}",
+            role="orchestrator",
+            node_id="session",
+        )
 
         yield {"event": "start", "goal": goal, "session_id": str(state.session_id)}
 
@@ -105,11 +125,19 @@ class AgentFSM:
 
         state.dag = dag
         self._plan_state.set_dag(dag)
+        plan_md = self._plan_state.to_markdown()
         yield {
             "event": "plan_ready",
-            "plan_markdown": self._plan_state.to_markdown(),
+            "plan_markdown": plan_md,
             "node_count": len(dag.nodes),
         }
+        # Persist the full plan to the scratchpad so every agent can read it
+        if self._scratchpad:
+            self._scratchpad.append(
+                f"Plan generated ({len(dag.nodes)} nodes):\n{plan_md}",
+                role="planner",
+                node_id="plan",
+            )
 
         # ── EXECUTION LOOP ──────────────────────────────────────────────
         state.fsm_state = FSMState.EXECUTING
@@ -144,6 +172,13 @@ class AgentFSM:
                         node, state, strategy
                     )
                     self._plan_state.mark_node_complete(node.id, result_summary, files_modified)
+                    if self._scratchpad:
+                        self._scratchpad.append(
+                            f"Node {node.id} complete: {node.title}\n{result_summary}"
+                            + (f"\nFiles: {', '.join(files_modified)}" if files_modified else ""),
+                            role="executor",
+                            node_id=node.id,
+                        )
                     yield {
                         "event": "node_complete",
                         "node_id": node.id,
@@ -251,15 +286,52 @@ class AgentFSM:
                     summary="Raw code snippet provided by the user in the initial prompt."
                 ))
 
-        if strategy == CognitiveStrategy.DEBATE:
+        if strategy == CognitiveStrategy.DECOMPOSE:
+            return await self._execute_decompose(node, state, context)
+        elif strategy == CognitiveStrategy.DEBATE:
             return await self._execute_debate(node, state, context)
         elif strategy == CognitiveStrategy.ESCALATE:
             return await self._execute_escalated(node, state, context)
         elif strategy == CognitiveStrategy.REFINE:
             return await self._execute_refine(node, state, context)
         else:
-            # DIRECT, VERIFY, DECOMPOSE — fall through to single-shot
+            # DIRECT, VERIFY — single-shot
             return await self._execute_single_shot(node, state, context, run_tests=(strategy == CognitiveStrategy.VERIFY))
+
+    async def _execute_decompose(
+        self,
+        node: PlanNode,
+        state: AgentState,
+        context: ContextPack,
+    ) -> tuple[str, list[str]]:
+        """
+        Break a broad node into 2–5 atomic child nodes and inject them into the live DAG.
+
+        The parent node is immediately marked COMPLETE (its "work" is the decomposition).
+        Child nodes are inserted into the DAG with correct dependency wiring, so the main
+        execution loop picks them up on the next ready_nodes() call without any special handling.
+        """
+        from src.orchestrator.node_decomposer import NodeDecomposer
+
+        decomposer = NodeDecomposer()
+        repo_summary = getattr(context, "repo_summary", None) or ""
+        children = await decomposer.decompose(node, context_summary=repo_summary)
+
+        # Inject children into the live DAG (rewires downstream deps automatically)
+        assert state.dag is not None
+        state.dag.decompose_node(node.id, children)
+
+        # Persist the updated DAG so the plan state store knows about the new nodes
+        self._plan_state.set_dag(state.dag)
+
+        logger.info(
+            "fsm.node_decomposed",
+            parent_id=node.id,
+            children=[c.id for c in children],
+        )
+
+        child_titles = ", ".join(c.title for c in children)
+        return f"Decomposed into {len(children)} subtasks: {child_titles}", []
 
     async def _execute_debate(
         self,

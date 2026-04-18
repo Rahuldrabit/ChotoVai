@@ -33,6 +33,9 @@ from tools.git_tools import (
 )
 from tools.pr_tools import pr_fetch, issue_fetch, pr_create
 from tools.verify_repo import verify_repo
+from tools.scratchpad_append import scratchpad_append
+from tools.contracts_update import contracts_update
+from tools.read_scratchpad import read_scratchpad
 
 # Registry: tool name → callable
 _TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
@@ -54,6 +57,9 @@ _TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "issue_fetch": issue_fetch,
     "pr_create": pr_create,
     "verify_repo": verify_repo,
+    "scratchpad_append": scratchpad_append,
+    "contracts_update": contracts_update,
+    "read_scratchpad": read_scratchpad,
 }
 
 
