@@ -145,9 +145,30 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# VS Code
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.iml
 
 # Windows
 Thumbs.db
 Desktop.ini
+.DS_Store
+
+# Project-specific
+data/
+kuzu_db/
+.claude/
+logs/
+
+# Local environment overrides
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.bak
+scratchpad_*.txt

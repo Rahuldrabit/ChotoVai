@@ -86,7 +86,13 @@ async def _async_run(goal: str, cwd: Path, verbose: bool) -> None:
         async for event in fsm.run(goal):
             etype = event.get("event", "")
 
-            if etype == "planning":
+            if etype == "routing":
+                tier = event.get("complexity", "?")
+                icons = {"trivial": "⚡", "moderate": "📋", "complex": "🔬"}
+                icon = icons.get(tier, "•")
+                status.update(f"[info]{icon} Complexity:[/info] {tier}")
+
+            elif etype == "planning":
                 status.update("[info]Planning task DAG...[/info]")
 
             elif etype == "plan_ready":

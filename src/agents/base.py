@@ -144,10 +144,18 @@ class BaseAgent(ABC):
         tool_trace: list[dict[str, Any]] = []
         iterations = 0
 
-        logger.info("agent.start", role=self.role.value, task=user_message[:80])
+        node_id = context.plan_node.id if context.plan_node else "?"
+        logger.info(
+            "agent.start",
+            role=self.role.value,
+            node=node_id,
+            task=user_message[:100],
+            tools=self.allowed_tools(),
+        )
 
         while iterations < self._cfg.max_iterations:
             iterations += 1
+            logger.info("agent.think", role=self.role.value, node=node_id, iteration=iterations)
 
             # ── THINK ──
             response: InferenceResponse = await self._client.complete(
@@ -163,7 +171,16 @@ class BaseAgent(ABC):
             # ── CHECK FOR FINAL ANSWER ──
             if self._FINAL_MARKER in content:
                 answer = content.split(self._FINAL_MARKER, 1)[-1].strip()
-                logger.info("agent.done", role=self.role.value, iterations=iterations, tokens=total_tokens)
+                duration_ms = (time.perf_counter() - t0) * 1000
+                logger.info(
+                    "agent.done",
+                    role=self.role.value,
+                    node=node_id,
+                    iterations=iterations,
+                    tool_calls=tool_calls_made,
+                    tokens=total_tokens,
+                    duration_ms=round(duration_ms),
+                )
                 return AgentResult(
                     role=self.role,
                     final_answer=answer,
@@ -172,7 +189,7 @@ class BaseAgent(ABC):
                     tool_trace=tool_trace,
                     tokens_used=total_tokens,
                     iterations=iterations,
-                    duration_ms=(time.perf_counter() - t0) * 1000,
+                    duration_ms=duration_ms,
                     success=True,
                 )
 
@@ -181,6 +198,7 @@ class BaseAgent(ABC):
 
             if not tool_call_matches:
                 # No tool call and no FINAL_ANSWER → prompt the model to be explicit
+                logger.debug("agent.no_tool_call", role=self.role.value, node=node_id, iteration=iterations)
                 messages.append(AgentMessage(
                     role="user",
                     content=(
@@ -203,19 +221,53 @@ class BaseAgent(ABC):
                     continue
 
                 if tool_name not in self.allowed_tools():
+                    logger.warning(
+                        "agent.tool_not_allowed",
+                        role=self.role.value,
+                        tool=tool_name,
+                        allowed=self.allowed_tools(),
+                    )
                     observation_parts.append(
                         f"ERROR: tool '{tool_name}' is not in your allowed set: {self.allowed_tools()}"
                     )
                     continue
 
+                # Log the outgoing tool call
+                args_preview = {k: str(v)[:80] for k, v in arguments.items()}
+                logger.info(
+                    "agent.tool_call",
+                    role=self.role.value,
+                    node=node_id,
+                    tool=tool_name,
+                    args=args_preview,
+                )
+
                 tool_call = ToolCall(name=tool_name, arguments=arguments)
                 result = await execute_tool(tool_call)
                 tool_calls_made += 1
+
+                # Log the returned result
+                result_preview = (
+                    result.content[:120]
+                    if not result.is_error
+                    else f"ERROR — {result.content[:100]}"
+                )
+                logger.info(
+                    "agent.tool_result",
+                    role=self.role.value,
+                    node=node_id,
+                    tool=tool_name,
+                    ok=not result.is_error,
+                    duration_ms=round(result.duration_ms),
+                    preview=result_preview,
+                )
+
                 tool_trace.append(
                     {
                         "tool": tool_name,
                         "arguments": arguments,
                         "is_error": bool(result.is_error),
+                        "duration_ms": result.duration_ms,
                     }
                 )
                 prefix = "Result" if not result.is_error else "Error"
@@ -228,7 +280,16 @@ class BaseAgent(ABC):
             ))
 
         # ── LIMIT REACHED ──
-        logger.warning("agent.limit_reached", role=self.role.value, iterations=iterations)
+        duration_ms = (time.perf_counter() - t0) * 1000
+        logger.warning(
+            "agent.limit_reached",
+            role=self.role.value,
+            node=node_id,
+            iterations=iterations,
+            tool_calls=tool_calls_made,
+            tokens=total_tokens,
+            duration_ms=round(duration_ms),
+        )
         return AgentResult(
             role=self.role,
             final_answer="ERROR: agent reached maximum iterations without completing the task.",
@@ -237,7 +298,7 @@ class BaseAgent(ABC):
             tool_trace=tool_trace,
             tokens_used=total_tokens,
             iterations=iterations,
-            duration_ms=(time.perf_counter() - t0) * 1000,
+            duration_ms=duration_ms,
             success=False,
         )
 

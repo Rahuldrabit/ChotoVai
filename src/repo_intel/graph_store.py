@@ -6,7 +6,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import kuzu
+try:
+    import kuzu
+    _KUZU_AVAILABLE = True
+except ImportError:
+    kuzu = None  # type: ignore[assignment]
+    _KUZU_AVAILABLE = False
 import structlog
 
 from src.core.config import get_config

@@ -180,6 +180,37 @@ class Planner:
 
         raise RuntimeError(f"Planner failed after {max_retries} attempts: {last_error}")
 
+    async def plan_lite(
+        self,
+        goal: str,
+        max_retries: int = 2,
+    ) -> TaskDAG:
+        """
+        Lightweight single-call planner for MODERATE complexity tasks.
+        Skips the ToT approach-drafting phase — calls the model once directly.
+        """
+        messages = [
+            AgentMessage(role="system", content=_PLANNER_SYSTEM),
+            AgentMessage(role="user", content=f"Goal: {goal}\n\nGenerate a TaskDAG to execute this goal."),
+        ]
+        last_error: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response_obj = await self._client.complete_json(
+                    messages=messages,
+                    schema=_TaskDAGResponse,
+                )
+                assert isinstance(response_obj, _TaskDAGResponse)
+                dag = self._convert(response_obj, goal)
+                logger.info("planner.lite_success", nodes=len(dag.nodes), attempt=attempt)
+                return dag
+            except Exception as e:
+                last_error = e
+                logger.warning("planner.lite_failed", attempt=attempt, error=str(e))
+                messages.append(AgentMessage(role="assistant", content=f"(failed: {e})"))
+                messages.append(AgentMessage(role="user", content="Fix JSON and output ONLY valid JSON."))
+        raise RuntimeError(f"plan_lite failed after {max_retries} attempts: {last_error}")
+
     @staticmethod
     def _convert(response: _TaskDAGResponse, goal: str) -> TaskDAG:
         """Convert the LLM response schema into a TaskDAG."""

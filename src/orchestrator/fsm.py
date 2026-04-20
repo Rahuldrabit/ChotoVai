@@ -69,6 +69,9 @@ class AgentFSM:
         self._scratchpad: SessionScratchpad | None = None
         self._contracts: ContractStore | None = None
         self._context_assembler = ContextAssembler(episodic_store=self._episodic)
+        # Per-session safety valve tracking
+        self._trivial_promoted = False
+        self._current_complexity: TaskComplexity | None = None
 
     async def run(self, goal: str) -> AsyncIterator[dict]:
         """
@@ -105,6 +108,8 @@ class AgentFSM:
         # MODERATE → lite planner, single model call, skip ToT drafting
         # COMPLEX  → full intent reasoning + ToT planning (existing path)
         complexity = await self._task_router.classify(goal)
+        self._current_complexity = complexity
+        self._trivial_promoted = False  # Reset per-session
         yield {"event": "routing", "complexity": complexity.value}
         logger.info("fsm.routing", complexity=complexity.value, goal=goal[:80])
 
@@ -117,9 +122,23 @@ class AgentFSM:
         elif complexity == TaskComplexity.MODERATE:
             state.fsm_state = FSMState.PLANNING
             self._checkpoint(state)
+
+            # Lite intent rewrite — 1 model call, no ToT selection
+            planning_goal = goal
+            yield {"event": "reasoning", "message": "Clarifying intent (lite)..."}
+            try:
+                from src.orchestrator.intent_reasoner import IntentReasoner
+                reasoner = IntentReasoner()
+                intent = await reasoner.rewrite_lite(raw_query=goal)
+                state.intent_analysis = intent
+                self._checkpoint(state)
+                planning_goal = intent.rewritten_query
+            except Exception as e:
+                yield {"event": "warn", "message": f"Lite intent rewrite failed: {e}. Using raw goal."}
+
             yield {"event": "planning", "message": "Generating task plan (lite)..."}
             try:
-                dag = await self._planner.plan_lite(goal=goal)
+                dag = await self._planner.plan_lite(goal=planning_goal)
             except Exception as e:
                 state.fsm_state = FSMState.FAILED
                 state.error_history.append(f"Planning failed: {e}")
@@ -221,6 +240,29 @@ class AgentFSM:
                     node.retry_count += 1
                     if node.retry_count >= self._cfg.retry_limit:
                         self._plan_state.mark_node_failed(node.id, str(e))
+                        # Safety valve: if TRIVIAL node exhausted retries, promote to MODERATE
+                        if self._current_complexity == TaskComplexity.TRIVIAL and not self._trivial_promoted:
+                            self._trivial_promoted = True
+                            yield {"event": "tier_promoted", "from": "trivial", "to": "moderate"}
+                            logger.info("fsm.tier_promoted", reason="trivial_node_failed", node_id=node.id)
+                            try:
+                                new_dag = await self._planner.plan_lite(goal)
+                                self._plan_state.set_dag(new_dag)
+                                dag = new_dag  # Update local reference
+                                self._current_complexity = TaskComplexity.MODERATE
+                                # Reset this node's status for retry
+                                self._plan_state.update_node(node.id, status=NodeStatus.PENDING)
+                                node.retry_count = 0  # Reset retry counter for new plan
+                                yield {
+                                    "event": "node_retry",
+                                    "node_id": node.id,
+                                    "attempt": node.retry_count,
+                                }
+                                continue  # Restart execution loop with new plan
+                            except Exception as plan_error:
+                                logger.error("fsm.tier_promotion_failed", error=str(plan_error))
+                                state.error_history.append(f"Tier promotion failed: {plan_error}")
+                                # Fall through to original failure handling
                         state.error_history.append(f"Node {node.id} failed: {e}")
                         yield {"event": "node_failed", "node_id": node.id, "error": str(e)}
                     else:

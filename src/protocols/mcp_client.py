@@ -160,18 +160,21 @@ async def execute_tool(tool_call: ToolCall) -> ToolResult:
         )
 
     fn = _TOOL_REGISTRY[name]
-    logger.debug("tool_call", tool=name, args=args)
+    args_preview = {k: str(v)[:80] for k, v in args.items()}
+    logger.info("mcp.dispatching", tool=name, args=args_preview)
     t0 = time.perf_counter()
 
     try:
         ok, reason = _approve(name, args)
         if not ok:
+            duration_ms = (time.perf_counter() - t0) * 1000
+            logger.warning("mcp.tool_denied", tool=name, reason=reason)
             return ToolResult(
                 tool_call_id=tool_call.id,
                 name=name,
                 content=reason,
                 is_error=True,
-                duration_ms=(time.perf_counter() - t0) * 1000,
+                duration_ms=duration_ms,
             )
         result = fn(**args)
         duration_ms = (time.perf_counter() - t0) * 1000
@@ -184,7 +187,13 @@ async def execute_tool(tool_call: ToolCall) -> ToolResult:
         else:
             content = str(result)
 
-        logger.debug("tool_result", tool=name, duration_ms=round(duration_ms, 1), is_error=False)
+        logger.info(
+            "mcp.tool_returned",
+            tool=name,
+            duration_ms=round(duration_ms, 1),
+            ok=True,
+            preview=content[:120],
+        )
         return ToolResult(
             tool_call_id=tool_call.id,
             name=name,
@@ -194,7 +203,7 @@ async def execute_tool(tool_call: ToolCall) -> ToolResult:
         )
     except Exception as e:
         duration_ms = (time.perf_counter() - t0) * 1000
-        logger.warning("tool_error", tool=name, error=str(e))
+        logger.warning("mcp.tool_error", tool=name, error=str(e), duration_ms=round(duration_ms, 1))
         return ToolResult(
             tool_call_id=tool_call.id,
             name=name,

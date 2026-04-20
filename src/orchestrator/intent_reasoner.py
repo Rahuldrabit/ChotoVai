@@ -5,6 +5,7 @@ Deconstructs intent, extracts code blocks, and reconstructs an explicit instruct
 from __future__ import annotations
 
 import structlog
+from pydantic import BaseModel, Field
 
 from src.core.schemas import AgentMessage, AgentRole, IntentAnalysis
 from src.serving.model_registry import get_client
@@ -29,6 +30,17 @@ _EVALUATOR_SYSTEM = """\
 You are a senior technical judge. Review the user's raw prompt, and evaluate the 3 proposed interpretations of their intent.
 Select the single best interpretation that is the most logical, safest, and most actionable for an AI Planner.
 Your output must be JSON specifying the 0-indexed integer of the best interpretation, and a brief reasoning.
+"""
+
+_LITE_REWRITE_SYSTEM = """\
+You are a technical intent clarifier. Given a user's coding task, produce a single \
+highly explicit, structured instruction set that an AI planner can execute unambiguously.
+Output valid JSON with exactly these fields:
+- primary_intent (string): one-sentence summary of what the user wants
+- explicit_constraints (list[str]): requirements the user stated directly
+- implicit_assumptions (list[str]): things the user likely implies but didn't state
+- extracted_code_snippets (list[str]): any pasted code blocks from the query
+- rewritten_query (string): a detailed, explicit version of the task for the planner
 """
 
 class _IntentToTResponse(BaseModel):
@@ -113,3 +125,28 @@ class IntentReasoner:
         # Fallback to the first interpretation if evaluation fails
         logger.warning("intent_reasoner.eval_fallback")
         return tot_response.interpretations[0]
+
+    async def rewrite_lite(self, raw_query: str, max_retries: int = 2) -> IntentAnalysis:
+        """Single-call intent rewrite — no ToT selection phase. Used for MODERATE tasks."""
+        messages = [
+            AgentMessage(role="system", content=_LITE_REWRITE_SYSTEM),
+            AgentMessage(role="user", content=raw_query),
+        ]
+        last_error: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = await self._client.complete_json(messages=messages, schema=IntentAnalysis)
+                assert isinstance(result, IntentAnalysis)
+                logger.info("intent_reasoner.lite_rewrite_complete", attempt=attempt)
+                return result
+            except Exception as e:
+                last_error = e
+                logger.warning("intent_reasoner.lite_rewrite_failed", attempt=attempt, error=str(e))
+                messages.append(AgentMessage(role="assistant", content=f"(failed: {e})"))
+                messages.append(AgentMessage(role="user", content="Fix JSON and retry."))
+        # Fallback: return minimal analysis preserving the raw query
+        logger.warning("intent_reasoner.lite_rewrite_fallback", error=str(last_error))
+        return IntentAnalysis(
+            primary_intent=raw_query,
+            rewritten_query=raw_query,
+        )
