@@ -88,6 +88,9 @@ The Critic reviewed your code and scored it {score}/10 (threshold: {threshold}/1
 ## Failing Tests Written by Critic
 {failing_tests}
 
+## Actual Pytest Output (if tests were runnable)
+{test_run_output}
+
 ## Your Task
 1. Rebut each objection in one sentence.
 2. Fix every issue the Critic identified.
@@ -221,6 +224,31 @@ class DebateGraph:
             debate = await self._critic_node(debate, viable_candidates, context)
             logger.info("debate.critic_move", node_id=node.id, turn=debate.turn_count, score=debate.critic_score)
 
+            # ── EXECUTE FAILING TESTS ─────────────────────────────────────
+            # Run the critic's failing tests via subprocess to get real pytest output
+            if debate.critic_failing_tests:
+                from pathlib import Path
+                import tempfile
+                tmp_file = None
+                try:
+                    # Write tests to a temporary file in tests directory
+                    tests_dir = Path(".") / "tests"
+                    tests_dir.mkdir(parents=True, exist_ok=True)
+                    tmp_file = tests_dir / f"_debate_tmp_{debate.node_id.replace('/', '_')}_t{debate.turn_count}.py"
+                    tmp_file.write_text("\n\n".join(debate.critic_failing_tests))
+
+                    # Run pytest on the temp file
+                    validator = DeterministicValidator()
+                    pytest_result = validator._run_pytest(str(tmp_file))
+                    debate.last_test_run_output = pytest_result.message or ""
+                    logger.info("debate.test_execution", node_id=node.id, tests_count=len(debate.critic_failing_tests))
+                except Exception as e:
+                    logger.warning("debate.test_execution_error", error=str(e))
+                    debate.last_test_run_output = f"ERROR running tests: {e}"
+                finally:
+                    if tmp_file and tmp_file.exists():
+                        tmp_file.unlink()
+
             # ── REFEREE EDGE ──────────────────────────────────────────────
             routing = self._route_after_critic(debate)
 
@@ -255,12 +283,14 @@ class DebateGraph:
         extra = None
         if debate.turn_count > 1 and debate.critic_reasoning:
             failing_str = "\n".join(f"  - {t}" for t in debate.critic_failing_tests) or "  (none provided)"
+            test_output_str = debate.last_test_run_output or "  (tests could not be executed)"
             extra = _CODER_REBUTTAL_TEMPLATE.format(
                 score=debate.critic_score,
                 threshold=debate.acceptance_threshold,
                 compressed_history=debate.compressed_history or "(None yet)",
                 reasoning=debate.critic_reasoning,
                 failing_tests=failing_str,
+                test_run_output=test_output_str,
                 turn=debate.turn_count,
                 max_turns=debate.max_turns,
             )

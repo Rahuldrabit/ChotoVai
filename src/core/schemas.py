@@ -392,6 +392,7 @@ class DebateState(BaseModel):
     critic_score: int = 0                # 0-10 assigned by Critic each round
     critic_reasoning: str = ""           # Critic's argument for its score
     critic_failing_tests: list[str] = Field(default_factory=list)
+    last_test_run_output: str = ""       # Actual pytest output for failing tests (for coder rebuttal)
 
     # Full adversarial transcript
     moves: list[DebateMove] = Field(default_factory=list)

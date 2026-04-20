@@ -37,6 +37,7 @@ from src.memory.plan_state import PlanState
 from src.memory.scratchpad import SessionScratchpad, set_active_scratchpad
 from src.orchestrator.cognitive_router import CognitiveRouter
 from src.orchestrator.planner import Planner
+from src.orchestrator.task_router import TaskComplexity, TaskRouter
 from src.validators.deterministic import DeterministicValidator
 from tools.verify_repo import verify_repo
 
@@ -62,6 +63,8 @@ class AgentFSM:
         self._episodic = EpisodicStore()
         self._plan_state = PlanState(data_dir=self._data_dir)
         self._cognitive_router = CognitiveRouter()
+        from src.serving.model_registry import get_client
+        self._task_router = TaskRouter(client=get_client(AgentRole.ORCHESTRATOR))
         # Scratchpad and contracts are initialised per-session in run()
         self._scratchpad: SessionScratchpad | None = None
         self._contracts: ContractStore | None = None
@@ -96,33 +99,61 @@ class AgentFSM:
 
         yield {"event": "start", "goal": goal, "session_id": str(state.session_id)}
 
-        # ── REASONING ─────────────────────────────────────────────────────
-        yield {"event": "reasoning", "message": "Analyzing user intent..."}
-        try:
-            from src.orchestrator.intent_reasoner import IntentReasoner
-            reasoner = IntentReasoner()
-            intent = await reasoner.analyze_and_rewrite(raw_query=goal)
-            state.intent_analysis = intent
+        # ── COMPLEXITY ROUTING ────────────────────────────────────────────
+        # Classify the goal before spending model calls on planning.
+        # TRIVIAL  → build 1-node DAG directly (0 extra model calls)
+        # MODERATE → lite planner, single model call, skip ToT drafting
+        # COMPLEX  → full intent reasoning + ToT planning (existing path)
+        complexity = await self._task_router.classify(goal)
+        yield {"event": "routing", "complexity": complexity.value}
+        logger.info("fsm.routing", complexity=complexity.value, goal=goal[:80])
+
+        planning_goal = goal
+        dag: TaskDAG
+
+        if complexity == TaskComplexity.TRIVIAL:
+            dag = self._task_router.build_trivial_dag(goal)
+
+        elif complexity == TaskComplexity.MODERATE:
+            state.fsm_state = FSMState.PLANNING
             self._checkpoint(state)
-            planning_goal = intent.rewritten_query
-        except Exception as e:
-            yield {"event": "warn", "message": f"Intent reasoning failed: {e}. Falling back to raw goal."}
-            planning_goal = goal
+            yield {"event": "planning", "message": "Generating task plan (lite)..."}
+            try:
+                dag = await self._planner.plan_lite(goal=goal)
+            except Exception as e:
+                state.fsm_state = FSMState.FAILED
+                state.error_history.append(f"Planning failed: {e}")
+                self._checkpoint(state)
+                yield {"event": "failed", "reason": str(e)}
+                return
 
-        # ── PLANNING ──────────────────────────────────────────────────────
-        state.fsm_state = FSMState.PLANNING
-        self._checkpoint(state)
-        yield {"event": "planning", "message": "Generating task plan..."}
+        else:  # COMPLEX — full intent reasoning + ToT planning
+            # ── REASONING ─────────────────────────────────────────────────
+            yield {"event": "reasoning", "message": "Analyzing user intent..."}
+            try:
+                from src.orchestrator.intent_reasoner import IntentReasoner
+                reasoner = IntentReasoner()
+                intent = await reasoner.analyze_and_rewrite(raw_query=goal)
+                state.intent_analysis = intent
+                self._checkpoint(state)
+                planning_goal = intent.rewritten_query
+            except Exception as e:
+                yield {"event": "warn", "message": f"Intent reasoning failed: {e}. Falling back to raw goal."}
 
-        try:
-            dag = await self._planner.plan(goal=planning_goal)
-        except Exception as e:
-            state.fsm_state = FSMState.FAILED
-            state.error_history.append(f"Planning failed: {e}")
+            # ── PLANNING ──────────────────────────────────────────────────
+            state.fsm_state = FSMState.PLANNING
             self._checkpoint(state)
-            yield {"event": "failed", "reason": str(e)}
-            return
+            yield {"event": "planning", "message": "Generating task plan..."}
+            try:
+                dag = await self._planner.plan(goal=planning_goal)
+            except Exception as e:
+                state.fsm_state = FSMState.FAILED
+                state.error_history.append(f"Planning failed: {e}")
+                self._checkpoint(state)
+                yield {"event": "failed", "reason": str(e)}
+                return
 
+        # ── Persist plan (all tiers) ──────────────────────────────────────
         state.dag = dag
         self._plan_state.set_dag(dag)
         plan_md = self._plan_state.to_markdown()
@@ -131,10 +162,9 @@ class AgentFSM:
             "plan_markdown": plan_md,
             "node_count": len(dag.nodes),
         }
-        # Persist the full plan to the scratchpad so every agent can read it
         if self._scratchpad:
             self._scratchpad.append(
-                f"Plan generated ({len(dag.nodes)} nodes):\n{plan_md}",
+                f"Plan generated ({len(dag.nodes)} nodes, complexity={complexity.value}):\n{plan_md}",
                 role="planner",
                 node_id="plan",
             )
@@ -217,10 +247,10 @@ class AgentFSM:
             try:
                 from src.validators.agentic import AgenticValidator
                 ctx = await self._context_assembler.assemble(
-                    role=AgentRole.CRITIC, 
+                    role=AgentRole.CRITIC,
                     plan_node=PlanNode(id="final", title="Final Validation", description=goal)
                 )
-                
+
                 # Verify the final state explicitly against extracted explicit intent constraints
                 changes_str = "Completed all task DAG nodes."
                 if state.intent_analysis:
@@ -230,10 +260,18 @@ class AgentFSM:
                 validator = AgenticValidator(n_critics=1)
                 verdict = await validator.validate_with_verdict(context_pack=ctx, changes_summary=changes_str)
                 if verdict.outcome == ValidationOutcome.FAIL:
-                    yield {"event": "warn", "message": f"Final alignment check highlighted missing constraints: {verdict.correction_hint}"}
                     state.error_history.append(f"Intent drift detected: {verdict.correction_hint}")
+                    state.fsm_state = FSMState.FAILED
+                    self._checkpoint(state)
+                    yield {"event": "failed", "reason": f"Final intent check failed: {verdict.correction_hint}", "errors": state.error_history}
+                    return
             except Exception as e:
-                logger.warning("fsm.final_validation_failed", error=str(e))
+                logger.warning("fsm.final_validation_error", error=str(e))
+                state.error_history.append(f"Validation error: {e}")
+                state.fsm_state = FSMState.FAILED
+                self._checkpoint(state)
+                yield {"event": "failed", "reason": f"Validation step failed: {e}", "errors": state.error_history}
+                return
 
             state.fsm_state = FSMState.COMPLETE
             self._checkpoint(state)
@@ -362,7 +400,9 @@ class AgentFSM:
         #     logger.warning("fsm.debate_trace_error", error=str(exc))
 
         # Post-debate deterministic validation (composite)
-        validation_results = self._verify(path=".", run_tests=False)
+        # Scope pytest to modified files only to avoid running entire test suite
+        test_path = debate.files_modified[0] if debate.files_modified else "."
+        validation_results = self._verify(path=test_path, run_tests=True)
         state.validation_results.extend(validation_results)
         state.last_node_validations = [
             {"validator": r.validator_name, "outcome": r.outcome.value, "message": r.message}
