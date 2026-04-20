@@ -107,13 +107,15 @@ class AgentFSM:
         # TRIVIAL  → build 1-node DAG directly (0 extra model calls)
         # MODERATE → lite planner, single model call, skip ToT drafting
         # COMPLEX  → full intent reasoning + ToT planning (existing path)
-        complexity = await self._task_router.classify(goal)
+        classification = await self._task_router.classify(goal)
+        complexity = classification.complexity
         self._current_complexity = complexity
         self._trivial_promoted = False  # Reset per-session
         yield {"event": "routing", "complexity": complexity.value}
         logger.info("fsm.routing", complexity=complexity.value, goal=goal[:80])
 
         planning_goal = goal
+        extracted_code = classification.code_snippets  # Preserve extracted code for intent reasoning
         dag: TaskDAG
 
         if complexity == TaskComplexity.TRIVIAL:
@@ -129,7 +131,7 @@ class AgentFSM:
             try:
                 from src.orchestrator.intent_reasoner import IntentReasoner
                 reasoner = IntentReasoner()
-                intent = await reasoner.rewrite_lite(raw_query=goal)
+                intent = await reasoner.rewrite_lite(raw_query=goal, code_snippets=extracted_code)
                 state.intent_analysis = intent
                 self._checkpoint(state)
                 planning_goal = intent.rewritten_query
@@ -152,7 +154,7 @@ class AgentFSM:
             try:
                 from src.orchestrator.intent_reasoner import IntentReasoner
                 reasoner = IntentReasoner()
-                intent = await reasoner.analyze_and_rewrite(raw_query=goal)
+                intent = await reasoner.analyze_and_rewrite(raw_query=goal, code_snippets=extracted_code)
                 state.intent_analysis = intent
                 self._checkpoint(state)
                 planning_goal = intent.rewritten_query

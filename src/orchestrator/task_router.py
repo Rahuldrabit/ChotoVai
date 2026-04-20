@@ -9,10 +9,15 @@ Classifies each incoming goal across 4 independent dimensions:
 
 Clear cases are decided in <1 ms with no model calls.
 Ambiguous cases (score 4–5) trigger a single minimal model call (max_tokens=5).
+
+Code extraction happens at the start — code blocks are separated from NL intent
+so that classification and intent rewriting see clean intent, and code snippets
+are preserved for downstream processing.
 """
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from enum import Enum
 
 import structlog
@@ -26,6 +31,15 @@ class TaskComplexity(str, Enum):
     TRIVIAL  = "trivial"   # skip intent + planning → 1 model call
     MODERATE = "moderate"  # skip intent + ToT draft → 2 model calls
     COMPLEX  = "complex"   # full pipeline (existing behaviour)
+
+
+@dataclass
+class ClassificationResult:
+    """Result of complexity classification with extracted code and cleaned intent."""
+    complexity: TaskComplexity
+    nl_intent: str                      # Natural language intent (code stripped)
+    code_snippets: list[str]            # Extracted code blocks (markdown fenced)
+    raw_goal: str                       # Original unmodified goal
 
 
 # ── Dimension 1 — Verb scoring ──────────────────────────────────────────────
@@ -117,26 +131,63 @@ class TaskRouter:
         """
         return re.sub(r'```[\s\S]*?```', '', text, flags=re.DOTALL).strip()
 
+    @staticmethod
+    def _extract_code(text: str) -> tuple[str, list[str]]:
+        """Extract code blocks from text.
+
+        Returns:
+            (nl_intent, code_snippets) where:
+            - nl_intent: text with code blocks removed
+            - code_snippets: list of extracted code blocks (markdown fenced format)
+        """
+        code_blocks = re.findall(r'```[\s\S]*?```', text, flags=re.DOTALL)
+        nl_intent = re.sub(r'```[\s\S]*?```', '', text, flags=re.DOTALL).strip()
+        return nl_intent, code_blocks
+
     # ── Public API ───────────────────────────────────────────────────────────
 
-    async def classify(self, goal: str) -> TaskComplexity:
-        """Classify a goal. LLM-first when a client is available; heuristic fallback otherwise."""
-        # ── Primary path: ask the model (fast max_tokens=5 call) ────────────
-        if self._client is not None:
-            result = await self._model_classify(goal)
-            if result is not None:
-                logger.info("task_router.classified_by_model", complexity=result.value, goal=goal[:60])
-                return result
-            logger.warning("task_router.model_classify_failed_fallback", goal=goal[:60])
+    async def classify(self, goal: str) -> ClassificationResult:
+        """Classify a goal and extract code.
 
-        # ── Fallback: heuristic scoring (model unavailable or errored) ───────
-        score = self._score(goal)
-        logger.debug("task_router.classified_by_heuristic", score=score, goal=goal[:60])
-        if score <= 1:
-            return TaskComplexity.TRIVIAL
-        if score >= 5:
-            return TaskComplexity.COMPLEX
-        return TaskComplexity.MODERATE
+        Returns ClassificationResult with:
+        - complexity: TaskComplexity (TRIVIAL/MODERATE/COMPLEX)
+        - nl_intent: Natural language intent (code blocks stripped)
+        - code_snippets: List of extracted code blocks
+        - raw_goal: Original unmodified goal
+
+        LLM-first classification when client available; heuristic fallback otherwise.
+        """
+        # ── Step 1: Extract code from goal ────────────────────────────────────
+        nl_intent, code_snippets = self._extract_code(goal)
+        logger.debug("task_router.code_extracted", num_snippets=len(code_snippets), goal=goal[:60])
+
+        # ── Step 2: Classify based on clean NL intent only ────────────────────
+        # Primary path: ask the model (fast max_tokens=5 call)
+        complexity = None
+        if self._client is not None:
+            complexity = await self._model_classify(nl_intent)
+            if complexity is not None:
+                logger.info("task_router.classified_by_model", complexity=complexity.value, goal=goal[:60])
+            else:
+                logger.warning("task_router.model_classify_failed_fallback", goal=goal[:60])
+
+        # Fallback: heuristic scoring (model unavailable or errored)
+        if complexity is None:
+            score = self._score(nl_intent)
+            logger.debug("task_router.classified_by_heuristic", score=score, goal=goal[:60])
+            if score <= 1:
+                complexity = TaskComplexity.TRIVIAL
+            elif score >= 5:
+                complexity = TaskComplexity.COMPLEX
+            else:
+                complexity = TaskComplexity.MODERATE
+
+        return ClassificationResult(
+            complexity=complexity,
+            nl_intent=nl_intent,
+            code_snippets=code_snippets,
+            raw_goal=goal,
+        )
 
     def build_trivial_dag(self, goal: str) -> TaskDAG:
         """Build a 1-node DAG for trivial tasks — skips the Planner entirely."""
@@ -195,8 +246,11 @@ class TaskRouter:
 
         return score
 
-    async def _model_classify(self, goal: str) -> TaskComplexity | None:
-        """Single max_tokens=5 call — returns None on any failure."""
+    async def _model_classify(self, nl_intent: str) -> TaskComplexity | None:
+        """Single max_tokens=5 call — returns None on any failure.
+
+        Takes already-clean NL intent (code blocks pre-extracted by caller).
+        """
         try:
             from src.core.schemas import AgentMessage
             resp = await self._client.complete(
@@ -208,7 +262,7 @@ class TaskRouter:
                             "No explanation — output exactly one word."
                         ),
                     ),
-                    AgentMessage(role="user", content=goal),
+                    AgentMessage(role="user", content=nl_intent),
                 ],
                 max_tokens=5,
                 temperature=0.0,

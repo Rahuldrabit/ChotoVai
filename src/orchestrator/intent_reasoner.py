@@ -59,12 +59,26 @@ class IntentReasoner:
     def __init__(self) -> None:
         self._client = get_client(AgentRole.ORCHESTRATOR)
 
-    async def analyze_and_rewrite(self, raw_query: str, max_retries: int = 2) -> IntentAnalysis:
-        """Analyze the query using ToT and return the best structured IntentAnalysis."""
+    async def analyze_and_rewrite(self, raw_query: str, code_snippets: list[str] | None = None, max_retries: int = 2) -> IntentAnalysis:
+        """Analyze the query using ToT and return the best structured IntentAnalysis.
+
+        Args:
+            raw_query: The user's original query (with or without code blocks)
+            code_snippets: Pre-extracted code blocks to preserve in analysis
+            max_retries: Number of retry attempts for JSON parsing
+        """
+        # Build query message — include code context if provided
+        query_message = raw_query
+        if code_snippets:
+            query_message += f"\n\n**Code provided:**\n"
+            for code in code_snippets:
+                query_message += f"{code}\n"
+            logger.debug("intent_reasoner.code_attached", num_snippets=len(code_snippets))
+
         # Phase 1: Generate 3 interpretations
         messages = [
             AgentMessage(role="system", content=_INTENT_SYSTEM),
-            AgentMessage(role="user", content=raw_query),
+            AgentMessage(role="user", content=query_message),
         ]
 
         tot_response: _IntentToTResponse | None = None
@@ -126,11 +140,25 @@ class IntentReasoner:
         logger.warning("intent_reasoner.eval_fallback")
         return tot_response.interpretations[0]
 
-    async def rewrite_lite(self, raw_query: str, max_retries: int = 2) -> IntentAnalysis:
-        """Single-call intent rewrite — no ToT selection phase. Used for MODERATE tasks."""
+    async def rewrite_lite(self, raw_query: str, code_snippets: list[str] | None = None, max_retries: int = 2) -> IntentAnalysis:
+        """Single-call intent rewrite — no ToT selection phase. Used for MODERATE tasks.
+
+        Args:
+            raw_query: The user's original query (with or without code blocks)
+            code_snippets: Pre-extracted code blocks to preserve in analysis
+            max_retries: Number of retry attempts for JSON parsing
+        """
+        # Build query message — include code context if provided
+        query_message = raw_query
+        if code_snippets:
+            query_message += f"\n\n**Code provided:**\n"
+            for code in code_snippets:
+                query_message += f"{code}\n"
+            logger.debug("intent_reasoner.code_attached", num_snippets=len(code_snippets))
+
         messages = [
             AgentMessage(role="system", content=_LITE_REWRITE_SYSTEM),
-            AgentMessage(role="user", content=raw_query),
+            AgentMessage(role="user", content=query_message),
         ]
         last_error: Exception | None = None
         for attempt in range(1, max_retries + 1):
