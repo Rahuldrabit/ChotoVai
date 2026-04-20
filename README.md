@@ -93,6 +93,8 @@ bridge.py         NDJSON bridge between VS Code extension and AgentFSM
 
 **SLMs, not frontier models** — every agent targets 7–9B parameter models. Reliability comes from deterministic feedback loops, not model scale.
 
+**LLM-first routing with code extraction** — incoming goals are classified (TRIVIAL/MODERATE/COMPLEX) by a fast LLM classifier with fallback heuristics. Code blocks are extracted once and separated from natural language intent, preventing code patterns from confusing classification or intent analysis. Code is preserved as explicit context for downstream reasoning.
+
 **External Blackboard** — a per-session `scratchpad.md` (append-only reasoning log) and `contracts.json` (JSON symbol table) live outside the LLM context window. All agents read a tail/compact summary at invocation time and write back via `scratchpad_append`, `contracts_update`, and `read_scratchpad` MCP tools. This lets a chain of agents share state across a long session without any single call exceeding the context limit.
 
 **Dynamic Decomposition** — the `CognitiveRouter` detects broad nodes (>80-word description, >3 success criteria, or multi-concept title) and routes them through `NodeDecomposer`, which calls the planner model to split the node into 2–5 atomic child nodes injected live into the running DAG.

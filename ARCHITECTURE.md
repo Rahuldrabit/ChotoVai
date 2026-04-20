@@ -103,6 +103,44 @@ The top-level finite state machine. States: `PLANNING → EXECUTING → [DEBATIN
 
 On session start the FSM creates per-session `scratchpad.md` and `contracts.json` and wires them into the `ContextAssembler` so all subsequent agent calls share the same blackboard.
 
+#### Task Router & Code Extraction (`task_router.py`)
+Routes incoming goals to the optimal execution tier (TRIVIAL, MODERATE, COMPLEX) based on semantic complexity.
+
+**Unified Code Extraction:**
+When a user provides code blocks + natural language query (e.g., "refactor this function"), TaskRouter immediately extracts code blocks once and splits the input into:
+- `nl_intent`: Natural language query with code blocks removed (for classification)
+- `code_snippets`: List of extracted markdown-fenced code blocks (preserved for downstream reasoning)
+
+This prevents code patterns (if statements, async keywords, semicolons) from confusing classification heuristics.
+
+**Classification Pipeline (LLM-first):**
+1. Primary: Send `nl_intent` to LLM classifier (max_tokens=5, one-word output: trivial/moderate/complex)
+2. Fallback (if model unavailable): Heuristic scoring across 4 dimensions:
+   - Verb type (creation/modification/reasoning)
+   - Scope width (single item / module / system-wide)
+   - Requirement count (logical connectors: AND, THEN, semicolons)
+   - Structural complexity flags (if/async/thread/lock keywords)
+
+**Routing Tiers:**
+- **TRIVIAL** — simple creation tasks (e.g., "write hello_world in file X") → skip planning, build 1-node DAG
+- **MODERATE** — modification + ambiguous intent (e.g., "add retry decorator") → lite intent rewrite (1 model call) + lite planner
+- **COMPLEX** — reasoning/refactoring/architectural (e.g., "refactor for scalability") → full Tree of Thoughts intent analysis + full planner
+
+#### Intent Reasoner (`intent_reasoner.py`)
+Clarifies user intent and extracts structured task description.
+
+**COMPLEX path:** Tree of Thoughts (ToT) with evaluation
+1. Generate 3 distinct interpretations of intent (literal vs defensive vs architectural)
+2. Evaluate all 3 with a judge model, select the best
+3. Return structured IntentAnalysis (primary_intent, constraints, assumptions, code_snippets, rewritten_query)
+
+**MODERATE path:** Single-call lite rewrite (no ToT selection)
+1. Direct call to intent clarifier (no branching/selection overhead)
+2. Return same IntentAnalysis schema
+3. Used when classification uncertainty is lower
+
+**Code Handling:** Both paths accept pre-extracted `code_snippets` as context. Code is appended to the user message so the model sees both intent and code together while maintaining a clean separation between intent classification and code analysis.
+
 #### Planner (`planner.py`)
 Uses a **Tree of Thoughts** approach: drafts 3 architectural approaches, scores them, selects the best, then decomposes it into a flat `TaskDAG`. Nodes carry `cognitive_strategy` hints (debate, verify, direct, decompose, escalate, refine).
 
