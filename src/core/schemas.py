@@ -315,6 +315,8 @@ class AgentState(BaseModel):
     session_id: UUID = Field(default_factory=uuid4)
     fsm_state: FSMState = FSMState.PLANNING
     user_goal: str
+    mentioned_files: list[str] = Field(default_factory=list)
+    prefetched_repo_summary: str | None = None
     intent_analysis: IntentAnalysis | None = None
     dag: TaskDAG | None = None
     active_node_id: str | None = None

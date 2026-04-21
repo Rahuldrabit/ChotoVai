@@ -16,13 +16,17 @@ are preserved for downstream processing.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 import structlog
 
+from src.core.config import get_config
 from src.core.schemas import AgentRole, CognitiveStrategy, NodeStatus, PlanNode, TaskDAG
+from src.repo_intel.stub_extractor import extract_stubs, render_stub_map
 
 logger = structlog.get_logger(__name__)
 
@@ -40,6 +44,8 @@ class ClassificationResult:
     nl_intent: str                      # Natural language intent (code stripped)
     code_snippets: list[str]            # Extracted code blocks (markdown fenced)
     raw_goal: str                       # Original unmodified goal
+    mentioned_files: list[str]          # Resolved file paths mentioned by user (best-effort)
+    prefetched_stub_map: str            # Rendered stub-only map for Planner injection
 
 
 # ── Dimension 1 — Verb scoring ──────────────────────────────────────────────
@@ -119,8 +125,10 @@ class TaskRouter:
     Pass a VLLMClient instance to enable the fast ambiguous-case fallback.
     """
 
-    def __init__(self, client=None) -> None:
+    def __init__(self, client=None, repo_root: Path | None = None) -> None:
         self._client = client  # VLLMClient | None
+        self._repo_root = repo_root
+        self._cfg = get_config()
 
     @staticmethod
     def _strip_code_blocks(text: str) -> str:
@@ -182,12 +190,241 @@ class TaskRouter:
             else:
                 complexity = TaskComplexity.MODERATE
 
+        mentioned_files, stub_map = self._prefetch_stubs(nl_intent)
+
         return ClassificationResult(
             complexity=complexity,
             nl_intent=nl_intent,
             code_snippets=code_snippets,
             raw_goal=goal,
+            mentioned_files=mentioned_files,
+            prefetched_stub_map=stub_map,
         )
+
+    # ── Prefetcher: mentioned-file stub extraction ─────────────────────────
+
+    def _prefetch_stubs(self, nl_intent: str) -> tuple[list[str], str]:
+        """Extract and render stubs for user-mentioned files.
+
+        Deterministic and bounded. Never returns full file contents.
+        """
+        repo_root = self._repo_root or Path(__file__).resolve().parents[2]
+        max_files = self._cfg.repo_intel.prefetch_max_files
+        max_symbols = self._cfg.repo_intel.prefetch_max_symbols_per_file
+        max_render = self._cfg.repo_intel.prefetch_max_render_chars
+
+        mentions = self._extract_file_mentions(nl_intent)
+        mentions.extend(m for m in self._extract_dir_mentions(nl_intent) if m not in mentions)
+        mentions.extend(m for m in self._extract_module_mentions(nl_intent) if m not in mentions)
+        if not mentions:
+            return [], ""
+
+        resolved: list[Path] = []
+        for m in mentions:
+            p = self._resolve_mention(repo_root, m)
+            if p is None:
+                continue
+            if p in resolved:
+                continue
+            if p.is_dir():
+                for f in self._expand_directory(p, repo_root=repo_root, max_files=max_files - len(resolved)):
+                    if f not in resolved:
+                        resolved.append(f)
+                    if len(resolved) >= max_files:
+                        break
+            else:
+                resolved.append(p)
+            if len(resolved) >= max_files:
+                break
+
+        if not resolved:
+            return [], ""
+
+        # Key by repo-relative display paths to avoid leaking absolute paths into prompts.
+        stubs_by_file: dict[Path, list] = {}
+        resolved_strs: list[str] = []
+        for p in resolved:
+            try:
+                if self._is_ignored_path(p, repo_root):
+                    continue
+                if not p.is_file():
+                    continue
+                if p.stat().st_size > self._cfg.repo_intel.max_file_size_kb * 1024:
+                    continue
+            except OSError:
+                continue
+
+            stubs = extract_stubs(p, max_symbols=max_symbols)
+            if not stubs:
+                continue
+            try:
+                display = p.relative_to(repo_root)
+            except Exception:
+                continue
+            stubs_by_file[display] = stubs
+            resolved_strs.append(str(display).replace("\\", "/"))
+
+        stub_map = render_stub_map(stubs_by_file, max_chars=max_render)
+        return resolved_strs, stub_map
+
+    @staticmethod
+    def _extract_file_mentions(text: str) -> list[str]:
+        # Capture path-like tokens with known code extensions.
+        # Examples: src/foo.py, `src/foo.py`, (src/foo.py:12)
+        exts = r"py|js|jsx|ts|tsx|go|rs|java"
+        pat = re.compile(rf"(?P<p>(?:[A-Za-z]:)?[\\/][^\s`\"']+?\.(?:{exts})|[^\s`\"']+?\.(?:{exts}))")
+        found: list[str] = []
+        for m in pat.finditer(text):
+            p = m.group("p").strip().strip("'\"`",)
+            p = p.rstrip(").,;:")
+            if p and p not in found:
+                found.append(p)
+        return found
+
+    @staticmethod
+    def _extract_dir_mentions(text: str) -> list[str]:
+        # Directory-like mentions (no extension), restricted to common repo roots.
+        # Examples: src/orchestrator/, tests/unit
+        pat = re.compile(
+            r"(?P<p>(?:src|tests|tools|infra|fine_tuning)(?:[\\/][^\s`\"']+)+[\\/]?)",
+            flags=re.IGNORECASE,
+        )
+        found: list[str] = []
+        for m in pat.finditer(text):
+            p = m.group("p").strip().strip("'\"`")
+            p = p.rstrip(").,;:")
+            # Skip things that look like files already
+            if "." in Path(p).name:
+                continue
+            if p and p not in found:
+                found.append(p)
+        return found
+
+    @staticmethod
+    def _extract_module_mentions(text: str) -> list[str]:
+        # Python-ish module mentions like src.orchestrator.fsm
+        # Only accept those starting with "src." to avoid matching versions like v1.2.3.
+        pat = re.compile(r"\bsrc\.(?:[A-Za-z_][A-Za-z0-9_]*\.?)+\b")
+        found: list[str] = []
+        for m in pat.finditer(text):
+            mod = m.group(0)
+            if mod and mod not in found:
+                # Convert to path-like mention
+                found.append(mod.replace(".", "/") + ".py")
+        return found
+
+    def _expand_directory(self, directory: Path, *, repo_root: Path, max_files: int) -> list[Path]:
+        if max_files <= 0:
+            return []
+
+        # Prefer non-recursive first; then recurse if still room.
+        exts = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java"}
+        candidates: list[Path] = []
+
+        try:
+            for child in directory.iterdir():
+                if len(candidates) >= max_files:
+                    break
+                if child.is_file() and child.suffix.lower() in exts and not self._is_ignored_path(child, repo_root):
+                    candidates.append(child)
+        except OSError:
+            return []
+
+        if len(candidates) >= max_files:
+            return sorted(candidates, key=lambda p: str(p).lower())[:max_files]
+
+        # Fill remaining slots with a shallow recursive scan.
+        try:
+            for f in directory.rglob("*"):
+                if len(candidates) >= max_files:
+                    break
+                if not f.is_file():
+                    continue
+                if f.suffix.lower() not in exts:
+                    continue
+                if self._is_ignored_path(f, repo_root):
+                    continue
+                if f in candidates:
+                    continue
+                candidates.append(f)
+        except OSError:
+            pass
+
+        return sorted(candidates, key=lambda p: str(p).lower())[:max_files]
+
+    @staticmethod
+    def _is_ignored_path(path: Path, repo_root: Path) -> bool:
+        try:
+            rel = path.resolve().relative_to(repo_root.resolve())
+        except Exception:
+            return True
+        ignored_parts = {".git", "node_modules", ".venv", "venv", "__pycache__", "data"}
+        return any(part in ignored_parts for part in rel.parts)
+
+    def _iter_repo_filename_matches(self, repo_root: Path, filename: str, *, max_matches: int = 50) -> list[Path]:
+        """Deterministically find matching filenames under repo_root.
+
+        Uses a sorted directory walk so the returned list order is stable across OS/filesystems.
+        """
+        if not filename:
+            return []
+
+        ignored_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__", "data"}
+        matches: list[Path] = []
+
+        for root, dirs, files in os.walk(repo_root):
+            # Deterministic traversal
+            dirs.sort(key=lambda d: d.lower())
+            files.sort(key=lambda f: f.lower())
+
+            # Prune ignored dirs (case-insensitive)
+            dirs[:] = [d for d in dirs if d.lower() not in {x.lower() for x in ignored_dirs}]
+
+            if filename in files:
+                p = (Path(root) / filename)
+                if self._is_ignored_path(p, repo_root):
+                    continue
+                matches.append(p)
+                if len(matches) >= max_matches:
+                    break
+
+        return matches
+
+    def _resolve_mention(self, repo_root: Path, mention: str) -> Path | None:
+        """Resolve a mention to a repo-local file path (best-effort)."""
+        m = mention.strip().replace("\\", "/")
+        if not m or ".." in m or m.startswith("~"):
+            return None
+
+        p = Path(m)
+        if p.is_absolute() or (len(m) > 2 and m[1] == ":"):
+            # Absolute path mention — only accept if inside repo root
+            try:
+                rp = p.resolve()
+                rp.relative_to(repo_root.resolve())
+                return rp
+            except Exception:
+                return None
+
+        candidate = (repo_root / p).resolve()
+        try:
+            candidate.relative_to(repo_root.resolve())
+        except Exception:
+            return None
+
+        if candidate.exists():
+            return candidate
+
+        # If mention was just a filename, search a small subset
+        if "/" not in m:
+            matches = self._iter_repo_filename_matches(repo_root, m, max_matches=50)
+            if matches:
+                # Choose first deterministic match (already in stable order)
+                try:
+                    return matches[0].resolve()
+                except Exception:
+                    return None
+        return None
 
     def build_trivial_dag(self, goal: str) -> TaskDAG:
         """Build a 1-node DAG for trivial tasks — skips the Planner entirely."""

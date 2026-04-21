@@ -67,9 +67,10 @@ class ContextAssembler:
             semantic_rules:  Project rules applicable to this task (optional).
             token_budget:    Max tokens for the pack (enforced by truncation).
         """
-        # Retrieve relevant episodic memories
+        # Retrieve relevant episodic memories (externality-guarded)
         episodic_summaries: list[str] = []
-        if self._episodic:
+        allow_external = (not self._cfg.contracts_only_externality) or (role == AgentRole.ORCHESTRATOR)
+        if self._episodic and allow_external:
             query = f"{plan_node.title}: {plan_node.description}"
             try:
                 entries: list[EpisodicEntry] = await self._episodic.retrieve(
@@ -112,10 +113,10 @@ class ContextAssembler:
                             language=snippet.language,
                         ))
 
-        # Inject scratchpad tail (last ~4K chars of session reasoning log)
+        # Inject scratchpad tail (externality-guarded)
         scratchpad_tail: str | None = None
-        if self._scratchpad:
-            tail = self._scratchpad.read_tail(max_chars=4000)
+        if self._scratchpad and allow_external:
+            tail = self._scratchpad.read_tail(max_chars=self._cfg.scratchpad_tail_max_chars)
             if tail:
                 scratchpad_tail = tail
                 used_chars += len(tail)

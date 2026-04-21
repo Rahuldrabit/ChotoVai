@@ -44,7 +44,13 @@ class ASTParser:
         if extension not in self._parsers:
             parser = tree_sitter.Parser()
             lang = tree_sitter.Language(LANGUAGE_EXTENSIONS[extension])
-            parser.set_language(lang)
+            # tree_sitter Python bindings have changed over time:
+            # - older: Parser.set_language(Language)
+            # - newer: Parser.language = Language
+            if hasattr(parser, "set_language"):
+                parser.set_language(lang)  # type: ignore[attr-defined]
+            else:
+                parser.language = lang  # type: ignore[attr-defined]
             self._parsers[extension] = parser
 
         return self._parsers[extension]
@@ -67,15 +73,67 @@ class ASTParser:
             logger.warning("ast_parser.parse_failed", file=str(path), error=str(e))
             return None
 
-    def query(self, tree: tree_sitter.Tree, extension: str, query_string: str) -> list[tuple[tree_sitter.Node, str]]:
-        """Run a tree-sitter query against a parsed tree."""
+    def query(
+        self, tree: tree_sitter.Tree, extension: str, query_string: str
+    ) -> list[tuple[tree_sitter.Node, str]]:
+        """Run a tree-sitter query against a parsed tree.
+
+        This returns a stable list of (Node, capture_name) tuples across
+        tree_sitter binding versions.
+        """
         if extension not in LANGUAGE_EXTENSIONS:
             return []
-        
+
+        def _normalize_captures(caps: Any, query_obj: Any) -> list[tuple[tree_sitter.Node, str]]:
+            # Newer QueryCursor.captures returns: {capture_name: [Node, ...]}
+            if isinstance(caps, dict):
+                out: list[tuple[tree_sitter.Node, str]] = []
+                for cap_name, nodes in caps.items():
+                    for n in nodes:
+                        out.append((n, str(cap_name)))
+                return out
+
+            # Some bindings return an iterable of (Node, capture_id/name).
+            out: list[tuple[tree_sitter.Node, str]] = []
+            try:
+                for item in caps:
+                    if not isinstance(item, tuple) or len(item) != 2:
+                        continue
+                    n, cap = item
+                    if isinstance(cap, int) and hasattr(query_obj, "capture_name"):
+                        try:
+                            cap = query_obj.capture_name(cap)
+                        except Exception:
+                            cap = str(cap)
+                    out.append((n, str(cap)))
+            except TypeError:
+                return []
+            return out
+
         try:
             lang = tree_sitter.Language(LANGUAGE_EXTENSIONS[extension])
-            query = lang.query(query_string)
-            return query.captures(tree.root_node)
+
+            # Build a query object.
+            query_obj: Any
+            if hasattr(tree_sitter, "Query"):
+                query_obj = tree_sitter.Query(lang, query_string)  # type: ignore[attr-defined]
+            else:
+                query_obj = lang.query(query_string)  # type: ignore[deprecated]
+
+            root = tree.root_node
+
+            # Prefer QueryCursor when available.
+            if hasattr(tree_sitter, "QueryCursor"):
+                cursor = tree_sitter.QueryCursor(query_obj)  # type: ignore[attr-defined]
+                caps = cursor.captures(root)
+                return _normalize_captures(caps, query_obj)
+
+            # Fallback: older bindings use Query.captures(root)
+            if hasattr(query_obj, "captures"):
+                caps = query_obj.captures(root)
+                return _normalize_captures(caps, query_obj)
+
+            return []
         except Exception as e:
             logger.warning("ast_parser.query_failed", error=str(e))
             return []

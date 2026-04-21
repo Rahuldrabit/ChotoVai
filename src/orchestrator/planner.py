@@ -183,15 +183,23 @@ class Planner:
     async def plan_lite(
         self,
         goal: str,
+        memory_summary: str | None = None,
+        repo_summary: str | None = None,
         max_retries: int = 2,
     ) -> TaskDAG:
         """
         Lightweight single-call planner for MODERATE complexity tasks.
         Skips the ToT approach-drafting phase — calls the model once directly.
         """
+        base_content = f"Goal: {goal}"
+        if repo_summary:
+            base_content += f"\n\nCodebase context:\n{repo_summary}"
+        if memory_summary:
+            base_content += f"\n\nRelevant past experience:\n{memory_summary}"
+
         messages = [
             AgentMessage(role="system", content=_PLANNER_SYSTEM),
-            AgentMessage(role="user", content=f"Goal: {goal}\n\nGenerate a TaskDAG to execute this goal."),
+            AgentMessage(role="user", content=f"{base_content}\n\nGenerate a TaskDAG to execute this goal."),
         ]
         last_error: Exception | None = None
         for attempt in range(1, max_retries + 1):

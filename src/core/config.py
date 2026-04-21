@@ -91,6 +91,21 @@ class MemoryConfig(BaseSettings):
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
 
+    # Scratchpad injection/compaction (Janitor)
+    scratchpad_tail_max_chars: int = 1500
+    scratchpad_max_chars_before_compact: int = 50_000
+    scratchpad_keep_recent_chars: int = 12_000
+    scratchpad_summary_target_chars: int = 3500
+
+    # Recursive summarization (Tracker)
+    tracker_trigger_chars: int = 20_000
+    tracker_chunk_chars: int = 6000
+    tracker_target_chars: int = 6000
+
+    # Externality guardrail: if True, only ORCHESTRATOR sees scratchpad/episodic.
+    # Specialists still receive contracts_context and current-node working context.
+    contracts_only_externality: bool = True
+
 
 class RepoIntelConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
@@ -105,6 +120,11 @@ class RepoIntelConfig(BaseSettings):
     supported_languages: list[str] = ["python", "javascript", "typescript", "go", "rust", "java"]
     max_file_size_kb: int = 500  # Skip files larger than this
     index_cache_dir: str = "./data/repo_index"
+
+    # Stub-only prefetch (Context Prefetcher)
+    prefetch_max_files: int = 10
+    prefetch_max_symbols_per_file: int = 200
+    prefetch_max_render_chars: int = 20_000
 
 
 class AgentConfig(BaseSettings):

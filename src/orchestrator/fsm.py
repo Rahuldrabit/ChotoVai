@@ -9,6 +9,7 @@ selection is delegated to CognitiveRouter (RLoT-style).
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from typing import AsyncIterator
@@ -33,11 +34,16 @@ from src.core.schemas import (
 from src.memory.context_assembler import ContextAssembler
 from src.memory.contracts import ContractStore, set_active_contracts
 from src.memory.episodic import EpisodicStore
+from src.memory.recursive_summarizer import RecursiveSummarizer, RecursiveSummarizerConfig
+from src.memory.scratchpad_janitor import JanitorConfig, ScratchpadJanitor
 from src.memory.plan_state import PlanState
 from src.memory.scratchpad import SessionScratchpad, set_active_scratchpad
 from src.orchestrator.cognitive_router import CognitiveRouter
 from src.orchestrator.planner import Planner
 from src.orchestrator.task_router import TaskComplexity, TaskRouter
+from src.repo_intel.pasted_code_stubber import stub_pasted_code
+from src.repo_intel.stub_extractor import extract_stubs
+from src.repo_intel.symbol_slicer import SliceConfig, slice_symbols
 from src.validators.deterministic import DeterministicValidator
 from tools.verify_repo import verify_repo
 
@@ -57,6 +63,7 @@ class AgentFSM:
     def __init__(self, data_dir: str | Path | None = None) -> None:
         cfg = get_config()
         self._cfg = cfg.agent
+        self._mem_cfg = cfg.memory
         self._data_dir = Path(data_dir or cfg.data_dir)
         self._planner = Planner()
         self._validator = DeterministicValidator()
@@ -64,7 +71,24 @@ class AgentFSM:
         self._plan_state = PlanState(data_dir=self._data_dir)
         self._cognitive_router = CognitiveRouter()
         from src.serving.model_registry import get_client
-        self._task_router = TaskRouter(client=get_client(AgentRole.ORCHESTRATOR))
+        self._repo_root = Path(__file__).resolve().parents[2]
+        self._task_router = TaskRouter(client=get_client(AgentRole.ORCHESTRATOR), repo_root=self._repo_root)
+
+        # Tracker (recursive summarizer) + Janitor (scratchpad compaction)
+        from src.agents.summarizer import SummarizerAgent
+        summarizer_agent = SummarizerAgent()
+        tracker_cfg = RecursiveSummarizerConfig(
+            trigger_chars=self._mem_cfg.tracker_trigger_chars,
+            chunk_chars=self._mem_cfg.tracker_chunk_chars,
+            target_chars=self._mem_cfg.tracker_target_chars,
+        )
+        self._tracker = RecursiveSummarizer(summarize_fn=summarizer_agent.summarize, cfg=tracker_cfg)
+        janitor_cfg = JanitorConfig(
+            max_chars_before_compact=self._mem_cfg.scratchpad_max_chars_before_compact,
+            keep_recent_chars=self._mem_cfg.scratchpad_keep_recent_chars,
+            summary_target_chars=self._mem_cfg.scratchpad_summary_target_chars,
+        )
+        self._janitor = ScratchpadJanitor(self._tracker, cfg=janitor_cfg)
         # Scratchpad and contracts are initialised per-session in run()
         self._scratchpad: SessionScratchpad | None = None
         self._contracts: ContractStore | None = None
@@ -114,9 +138,24 @@ class AgentFSM:
         yield {"event": "routing", "complexity": complexity.value}
         logger.info("fsm.routing", complexity=complexity.value, goal=goal[:80])
 
-        planning_goal = goal
+        planning_goal = classification.nl_intent or goal
         extracted_code = classification.code_snippets  # Preserve extracted code for intent reasoning
+        repo_summary = classification.prefetched_stub_map
+        state.mentioned_files = list(classification.mentioned_files or [])
+        state.prefetched_repo_summary = repo_summary or None
         dag: TaskDAG
+
+        if classification.mentioned_files:
+            yield {
+                "event": "prefetch",
+                "mentioned_files": classification.mentioned_files,
+            }
+            if self._scratchpad:
+                self._scratchpad.append(
+                    "Prefetched stubs for mentioned files:\n" + "\n".join(classification.mentioned_files),
+                    role="prefetcher",
+                    node_id="prefetch",
+                )
 
         if complexity == TaskComplexity.TRIVIAL:
             dag = self._task_router.build_trivial_dag(goal)
@@ -126,21 +165,33 @@ class AgentFSM:
             self._checkpoint(state)
 
             # Lite intent rewrite — 1 model call, no ToT selection
-            planning_goal = goal
+            planning_goal = classification.nl_intent or goal
             yield {"event": "reasoning", "message": "Clarifying intent (lite)..."}
             try:
                 from src.orchestrator.intent_reasoner import IntentReasoner
                 reasoner = IntentReasoner()
-                intent = await reasoner.rewrite_lite(raw_query=goal, code_snippets=extracted_code)
+
+                tracker_input = (goal or "") + ("\n\n" + "\n\n".join(extracted_code) if extracted_code else "")
+                if self._tracker.should_summarize(tracker_input):
+                    summarized = await self._tracker.summarize(
+                        tracker_input,
+                        hint=(
+                            "Summarize the user's goal and any pasted code into a compact description. "
+                            "Do not include verbatim code; preserve file paths and symbol names." 
+                        ),
+                    )
+                    intent = await reasoner.rewrite_lite(raw_query=summarized, code_snippets=[])
+                else:
+                    intent = await reasoner.rewrite_lite(raw_query=planning_goal, code_snippets=extracted_code)
                 state.intent_analysis = intent
                 self._checkpoint(state)
-                planning_goal = intent.rewritten_query
+                planning_goal = self._task_router._strip_code_blocks(intent.rewritten_query)
             except Exception as e:
                 yield {"event": "warn", "message": f"Lite intent rewrite failed: {e}. Using raw goal."}
 
             yield {"event": "planning", "message": "Generating task plan (lite)..."}
             try:
-                dag = await self._planner.plan_lite(goal=planning_goal)
+                dag = await self._planner.plan_lite(goal=planning_goal, repo_summary=repo_summary)
             except Exception as e:
                 state.fsm_state = FSMState.FAILED
                 state.error_history.append(f"Planning failed: {e}")
@@ -154,10 +205,22 @@ class AgentFSM:
             try:
                 from src.orchestrator.intent_reasoner import IntentReasoner
                 reasoner = IntentReasoner()
-                intent = await reasoner.analyze_and_rewrite(raw_query=goal, code_snippets=extracted_code)
+
+                tracker_input = (goal or "") + ("\n\n" + "\n\n".join(extracted_code) if extracted_code else "")
+                if self._tracker.should_summarize(tracker_input):
+                    summarized = await self._tracker.summarize(
+                        tracker_input,
+                        hint=(
+                            "Summarize the user's goal and any pasted code into a compact description. "
+                            "Do not include verbatim code; preserve file paths and symbol names." 
+                        ),
+                    )
+                    intent = await reasoner.analyze_and_rewrite(raw_query=summarized, code_snippets=[])
+                else:
+                    intent = await reasoner.analyze_and_rewrite(raw_query=planning_goal, code_snippets=extracted_code)
                 state.intent_analysis = intent
                 self._checkpoint(state)
-                planning_goal = intent.rewritten_query
+                planning_goal = self._task_router._strip_code_blocks(intent.rewritten_query)
             except Exception as e:
                 yield {"event": "warn", "message": f"Intent reasoning failed: {e}. Falling back to raw goal."}
 
@@ -166,7 +229,7 @@ class AgentFSM:
             self._checkpoint(state)
             yield {"event": "planning", "message": "Generating task plan..."}
             try:
-                dag = await self._planner.plan(goal=planning_goal)
+                dag = await self._planner.plan(goal=planning_goal, repo_summary=repo_summary)
             except Exception as e:
                 state.fsm_state = FSMState.FAILED
                 state.error_history.append(f"Planning failed: {e}")
@@ -248,7 +311,7 @@ class AgentFSM:
                             yield {"event": "tier_promoted", "from": "trivial", "to": "moderate"}
                             logger.info("fsm.tier_promoted", reason="trivial_node_failed", node_id=node.id)
                             try:
-                                new_dag = await self._planner.plan_lite(goal)
+                                new_dag = await self._planner.plan_lite(goal, repo_summary=repo_summary)
                                 self._plan_state.set_dag(new_dag)
                                 dag = new_dag  # Update local reference
                                 self._current_complexity = TaskComplexity.MODERATE
@@ -353,20 +416,45 @@ class AgentFSM:
         """
         role = node.assigned_role or AgentRole.CODER
 
-        # Assemble context (shared across all strategies)
-        context = await self._context_assembler.assemble(role=role, plan_node=node)
+        # Janitor: compact scratchpad if it has grown too large
+        if self._scratchpad:
+            try:
+                await self._janitor.maybe_compact(self._scratchpad)
+            except Exception as e:  # pragma: no cover
+                logger.debug("fsm.janitor_failed", error=str(e))
 
-        # Inject injected code snippets from user intent reasoning directly into context pack
+        # Markovian working summary: direct deps + optional 1 more hop
+        working_summary = self._build_markov_summary(node, state, max_chars=2000, max_hops=2)
+
+        from src.core.schemas import CodeSnippet
+
+        code_snippets: list[CodeSnippet] = []
+        code_snippets.extend(self._slice_repo_context_for_node(node, state))
+
+        # Replace raw pasted code injection with deterministic stubs (no verbatim bodies)
         if state.intent_analysis and state.intent_analysis.extracted_code_snippets:
-            from src.core.schemas import CodeSnippet
-            for i, snippet in enumerate(state.intent_analysis.extracted_code_snippets):
-                context.code_snippets.append(CodeSnippet(
-                    file_path=f"<user_pasted_snippet_{i+1}>",
-                    start_line=1,
-                    end_line=len(snippet.splitlines()),
-                    content=snippet,
-                    summary="Raw code snippet provided by the user in the initial prompt."
-                ))
+            for i, raw in enumerate(state.intent_analysis.extracted_code_snippets, start=1):
+                stub = stub_pasted_code(raw)
+                if not stub:
+                    continue
+                code_snippets.append(
+                    CodeSnippet(
+                        file_path=f"<user_pasted_stub_{i}>",
+                        start_line=1,
+                        end_line=stub.count("\n") + 1,
+                        content=stub + "\n",
+                        language="text",
+                        summary="Deterministic stub of user-pasted code (signatures/imports only).",
+                    )
+                )
+
+        # Assemble context (shared across all strategies)
+        context = await self._context_assembler.assemble(
+            role=role,
+            plan_node=node,
+            working_summary=working_summary or None,
+            code_snippets=code_snippets or None,
+        )
 
         if strategy == CognitiveStrategy.DECOMPOSE:
             return await self._execute_decompose(node, state, context)
@@ -379,6 +467,174 @@ class AgentFSM:
         else:
             # DIRECT, VERIFY — single-shot
             return await self._execute_single_shot(node, state, context, run_tests=(strategy == CognitiveStrategy.VERIFY))
+
+    def _slice_repo_context_for_node(self, node: PlanNode, state: AgentState) -> list["CodeSnippet"]:
+        """Return small, symbol-level snippets relevant to this node.
+
+        Uses only repo-local paths (captured during routing) and slices by symbol
+        names referenced in the node title/description.
+        """
+        node_text = (node.title + "\n" + node.description).strip()
+        if not node_text:
+            return []
+
+        mentioned: list[str] = [p for p in (state.mentioned_files or []) if p]
+        mentioned.extend(p for p in self._extract_file_mentions_from_text(node_text) if p not in mentioned)
+        if not mentioned:
+            return []
+
+        max_files = 4
+        max_symbols_per_file = 3
+        slice_cfg = SliceConfig(max_snippets_total=8, max_snippet_chars=6000, max_total_chars=18_000)
+
+        results: list[CodeSnippet] = []
+        for rel in mentioned[:max_files]:
+            path = self._resolve_repo_path(rel)
+            if path is None:
+                continue
+            try:
+                path.relative_to(self._repo_root.resolve())
+            except Exception:
+                continue
+            if not path.exists():
+                continue
+
+            # Directory mention: expand into bounded file list
+            paths: list[Path]
+            if path.is_dir():
+                paths = self._expand_repo_dir(path, max_files=max_files)
+            else:
+                if not path.is_file():
+                    continue
+                paths = [path]
+
+            for file_path in paths:
+                if len(results) >= slice_cfg.max_snippets_total:
+                    return results
+                stubs = extract_stubs(file_path, max_symbols=200)
+                matched: list[str] = []
+                for s in stubs:
+                    name = getattr(s, "name", "")
+                    if not name:
+                        continue
+                    if re.search(rf"\b{re.escape(name)}\b", node_text):
+                        matched.append(name)
+                    if len(matched) >= max_symbols_per_file:
+                        break
+                if not matched:
+                    continue
+
+                for snip in slice_symbols(file_path, matched, cfg=slice_cfg):
+                    results.append(snip)
+                    if len(results) >= slice_cfg.max_snippets_total:
+                        return results
+
+        return results
+
+    def _extract_file_mentions_from_text(self, text: str) -> list[str]:
+        exts = r"py|js|jsx|ts|tsx|go|rs|java"
+        pat = re.compile(rf"(?P<p>(?:[A-Za-z]:)?[\\/][^\s`\"']+?\.(?:{exts})|[^\s`\"']+?\.(?:{exts}))")
+        found: list[str] = []
+        for m in pat.finditer(text):
+            p = m.group("p").strip().strip("'\"`")
+            p = p.rstrip(").,;:")
+            if p and p not in found and ".." not in p:
+                found.append(p.replace("\\", "/"))
+        # Directory mentions (common roots)
+        dir_pat = re.compile(r"(?P<p>(?:src|tests|tools|infra|fine_tuning)(?:[\\/][^\s`\"']+)+[\\/]?)")
+        for m in dir_pat.finditer(text):
+            p = m.group("p").strip().strip("'\"`")
+            p = p.rstrip(").,;:")
+            if "." in Path(p).name:
+                continue
+            if p and p not in found and ".." not in p:
+                found.append(p.replace("\\", "/"))
+        # Module mentions like src.orchestrator.fsm
+        mod_pat = re.compile(r"\bsrc\.(?:[A-Za-z_][A-Za-z0-9_]*\.?)+\b")
+        for m in mod_pat.finditer(text):
+            mod = m.group(0)
+            if mod:
+                p = mod.replace(".", "/") + ".py"
+                if p not in found:
+                    found.append(p)
+        return found
+
+    def _resolve_repo_path(self, mention: str) -> Path | None:
+        m = (mention or "").strip().replace("\\", "/")
+        if not m or ".." in m or m.startswith("~"):
+            return None
+        p = Path(m)
+        if p.is_absolute() or (len(m) > 2 and m[1] == ":"):
+            try:
+                rp = p.resolve()
+                rp.relative_to(self._repo_root.resolve())
+                return rp
+            except Exception:
+                return None
+
+        candidate = (self._repo_root / p).resolve()
+        try:
+            candidate.relative_to(self._repo_root.resolve())
+            return candidate
+        except Exception:
+            return None
+
+    def _expand_repo_dir(self, directory: Path, *, max_files: int) -> list[Path]:
+        if max_files <= 0:
+            return []
+        exts = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java"}
+        files: list[Path] = []
+        try:
+            for f in directory.rglob("*"):
+                if len(files) >= max_files:
+                    break
+                if f.is_file() and f.suffix.lower() in exts:
+                    files.append(f)
+        except OSError:
+            return []
+        return sorted(files, key=lambda p: str(p).lower())[:max_files]
+
+    def _build_markov_summary(
+        self,
+        node: PlanNode,
+        state: AgentState,
+        *,
+        max_chars: int,
+        max_hops: int,
+    ) -> str:
+        dag = state.dag
+        if dag is None or not node.depends_on:
+            return ""
+
+        visited: set[str] = set()
+        lines: list[str] = ["Predecessor node summaries (Markov context):"]
+
+        def add(nid: str, hops_left: int) -> None:
+            if nid in visited:
+                return
+            visited.add(nid)
+            dep = dag.get_node(nid)
+            if dep is None:
+                return
+            if dep.result_summary:
+                lines.append(f"- {dep.id} {dep.title}: {dep.result_summary}")
+                if getattr(dep, "files_modified", None):
+                    fm = [f for f in (dep.files_modified or []) if f]
+                    if fm:
+                        lines.append(f"  files: {', '.join(fm[:12])}")
+
+            if hops_left <= 0:
+                return
+            for up in dep.depends_on or []:
+                add(up, hops_left - 1)
+
+        for d in node.depends_on:
+            add(d, max_hops - 1)
+            if sum(len(x) + 1 for x in lines) >= max_chars:
+                break
+
+        text = "\n".join(lines).strip()
+        return text[:max_chars]
 
     async def _execute_decompose(
         self,

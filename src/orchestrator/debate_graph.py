@@ -295,7 +295,7 @@ class DebateGraph:
                 max_turns=debate.max_turns,
             )
 
-        # Spawn 2 parallel GoT branches
+        # Spawn 2 parallel GoT branches (critic will evaluate/merge candidates).
         agent1 = CoderAgent() # type: ignore
         agent2 = CoderAgent() # type: ignore
         
@@ -313,15 +313,19 @@ class DebateGraph:
         for r in results:
             debate.tool_trace.extend(r.tool_trace)
 
-        for i, r in enumerate(results):
-            debate.moves.append(DebateMove(
-                turn=debate.turn_count,
-                actor=f"coder_{i+1}",
-                content=r.final_answer,
-                tokens_used=r.tokens_used,
-            ))
+        candidates = [r.final_answer for r in results if r.success] or [results[0].final_answer]
 
-        return [r.final_answer for r in results if r.success] or [results[0].final_answer]
+        # Keep the debate transcript stable: one coder move per turn.
+        debate.moves.append(
+            DebateMove(
+                turn=debate.turn_count,
+                actor="coder",
+                content=candidates[0],
+                tokens_used=tokens,
+            )
+        )
+
+        return candidates
 
     async def _critic_node(self, debate: DebateState, candidates: list[str], context: ContextPack) -> DebateState:
         """Player B — Evaluate parallel candidates, merge, and critique."""

@@ -106,6 +106,14 @@ On session start the FSM creates per-session `scratchpad.md` and `contracts.json
 #### Task Router & Code Extraction (`task_router.py`)
 Routes incoming goals to the optimal execution tier (TRIVIAL, MODERATE, COMPLEX) based on semantic complexity.
 
+**Context Prefetcher (stub-only):**
+When the user mentions a repo file path in plain text (e.g., `src/orchestrator/fsm.py`), the TaskRouter performs a deterministic prefetch step:
+- Resolve the mention to a repo-local file (blocks traversal like `../`)
+- Extract stubs only (function/class/method names + short signatures + nearby doc comments)
+- Render a compact “stub map” and attach it to the classification result
+
+The Planner receives this stub map as `repo_summary` before DAG generation, so it can plan with codebase structure without injecting full file contents.
+
 **Unified Code Extraction:**
 When a user provides code blocks + natural language query (e.g., "refactor this function"), TaskRouter immediately extracts code blocks once and splits the input into:
 - `nl_intent`: Natural language query with code blocks removed (for classification)
@@ -140,6 +148,8 @@ Clarifies user intent and extracts structured task description.
 3. Used when classification uncertainty is lower
 
 **Code Handling:** Both paths accept pre-extracted `code_snippets` as context. Code is appended to the user message so the model sees both intent and code together while maintaining a clean separation between intent classification and code analysis.
+
+**Tracker (recursive summarization):** For very large user inputs (goal + pasted code), the orchestrator can first run a recursive summarizer to produce a compact, non-verbatim description. This prevents the Planner from receiving large raw code blobs while preserving file paths and symbol names.
 
 #### Planner (`planner.py`)
 Uses a **Tree of Thoughts** approach: drafts 3 architectural approaches, scores them, selects the best, then decomposes it into a flat `TaskDAG`. Nodes carry `cognitive_strategy` hints (debate, verify, direct, decompose, escalate, refine).
@@ -191,6 +201,11 @@ Key methods:
 - `read_node(node_id)` — retrieve all entries for a specific plan node
 - `read_by_role(role, max_chars)` — retrieve entries from a specific agent role
 
+**Janitor compaction (truncate-in-place):**
+To hard-enforce bounded context growth across long sessions, the orchestrator can compact the scratchpad when it exceeds a configured size cap:
+- Summarize older entries into a single “janitor” summary block
+- Keep the most recent tail unchanged
+
 #### Code Contracts Store (`contracts.py`)
 A **JSON symbol table** stored at `./data/sessions/<session_id>/contracts.json`.
 
@@ -204,7 +219,7 @@ Assembles a `ContextPack` for each agent call from:
 - Top-3 episodic memories (vector search, filtered to PASS outcomes)
 - Semantic rules relevant to the node
 - Code snippets from 2-hop graph neighborhood (trimmed to token budget)
-- Scratchpad tail (last ~4K chars)
+- Scratchpad tail (config-bounded tail injection)
 - Compact contracts summary
 
 Total: ~2–3K tokens, assembled fresh per call.

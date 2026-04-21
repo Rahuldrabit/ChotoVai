@@ -155,8 +155,10 @@ class CognitiveRouter:
         word_count = len(node.description.split())
         if word_count > 80:
             return True
-        # Too many success criteria → the node is trying to do too much
-        if len(node.success_criteria) > 3:
+        # Too many success criteria → the node is trying to do too much.
+        # Keep this threshold relatively high: complex nodes can still be
+        # executed via debate without needing decomposition.
+        if len(node.success_criteria) > 6:
             return True
         # Title contains multi-concept conjunctions (e.g. "implement X and Y and Z")
         if len(_MULTI_CONCEPT_PATTERN.findall(node.title)) >= 2:
