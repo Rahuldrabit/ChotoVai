@@ -407,6 +407,9 @@ class DebateState(BaseModel):
     acceptance_threshold: int = 9        # score >= this → Coder wins (Critic concedes)
     outcome: DebateOutcome = DebateOutcome.IN_PROGRESS
 
+    # Parse failure tracking — auto-accept if critic can't produce valid JSON repeatedly
+    json_parse_failures: int = 0
+
     # Accounting
     tokens_used: int = 0
     tool_trace: list[dict[str, Any]] = Field(default_factory=list)

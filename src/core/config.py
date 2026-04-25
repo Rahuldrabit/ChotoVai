@@ -130,7 +130,7 @@ class RepoIntelConfig(BaseSettings):
 class AgentConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    max_iterations: int = 10         # Per planning node
+    max_iterations: int = 8          # Per planning node (was 10; 9B models converge faster)
     max_total_tokens: int = 200_000  # Per task
     wall_clock_timeout_s: float = 300.0  # 5 minutes per task
     retry_limit: int = 3
@@ -140,14 +140,14 @@ class AgentConfig(BaseSettings):
 
     # ── Adversarial debate settings ─────────────────────────────────────
     debate_enabled: bool = True          # Feature flag — set False to bypass debate
-    debate_max_turns: int = 5            # Maximum Coder↔Critic rounds before deadlock
-    debate_acceptance_threshold: int = 9  # Critic score >= this → Coder wins
+    debate_max_turns: int = 3            # Maximum Coder↔Critic rounds (was 5; 9B converges in 2-3)
+    debate_acceptance_threshold: int = 7  # Critic score >= this → Coder wins (was 9; reachable for 9B critics)
     # Deadlock resolution: "judge_ensemble" | "escalate" | "best_of_n"
     debate_deadlock_strategy: str = "judge_ensemble"
     # Confidence threshold for judge ensemble: std_dev > this → escalate to frontier
     debate_ensemble_confidence_threshold: float = 0.5
     # Token limit to prevent unbounded TTL loops
-    debate_max_token_budget: int = 50_000
+    debate_max_token_budget: int = 35_000  # was 50_000; moderate reduction for 9B runtimes
 
 
 class ObservabilityConfig(BaseSettings):

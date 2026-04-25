@@ -154,6 +154,9 @@ class BaseAgent(ABC):
             tools=self.allowed_tools(),
         )
 
+        last_iter_sig = ""
+        stuck_count = 0
+
         while iterations < self._cfg.max_iterations:
             iterations += 1
             logger.info("agent.think", role=self.role.value, node=node_id, iteration=iterations)
@@ -298,6 +301,27 @@ class BaseAgent(ABC):
                 )
                 prefix = "Result" if not result.is_error else "Error"
                 observation_parts.append(f"[{prefix} from {tool_name}]\n{result.content}")
+
+            # ── STUCK DETECTION — break if this iteration repeats the same tool calls ──
+            iter_sig = "|".join(
+                f"{tc.get('tool')}:{sorted((tc.get('arguments') or {}).items())}"
+                for tc in tool_trace[-len(tool_call_matches):]
+            ) if tool_call_matches else ""
+            if iter_sig and iter_sig == last_iter_sig:
+                stuck_count += 1
+                if stuck_count >= 2:
+                    logger.warning(
+                        "agent.stuck_detected",
+                        role=self.role.value,
+                        node=node_id,
+                        iteration=iterations,
+                        sig=iter_sig[:120],
+                    )
+                    messages.append(AgentMessage(role="user", content="\n\n".join(observation_parts)))
+                    break
+            else:
+                stuck_count = 0
+                last_iter_sig = iter_sig
 
             # Feed observations back as a user turn
             messages.append(AgentMessage(

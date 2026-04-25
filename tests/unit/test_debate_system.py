@@ -156,10 +156,10 @@ class TestCognitiveRouter:
         )
         assert self.router.select(node, agent_state) == CognitiveStrategy.DIRECT
 
-    def test_coder_simple_task_debate(self, simple_node: PlanNode, agent_state: AgentState) -> None:
-        # With debate_enabled=True (default), coder nodes → DEBATE
+    def test_coder_simple_task_refine(self, simple_node: PlanNode, agent_state: AgentState) -> None:
+        # Simple coder nodes → REFINE (single-shot + one critic pass, not full debate)
         strategy = self.router.select(simple_node, agent_state)
-        assert strategy == CognitiveStrategy.DEBATE
+        assert strategy == CognitiveStrategy.REFINE
 
     def test_complex_node_debate(self, complex_node: PlanNode, agent_state: AgentState) -> None:
         strategy = self.router.select(complex_node, agent_state)

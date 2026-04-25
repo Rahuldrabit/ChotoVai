@@ -111,8 +111,13 @@ class CognitiveRouter:
                     title=node.title,
                 )
                 return CognitiveStrategy.DEBATE
-            # Simple code task but still benefits from one critic pass
-            return CognitiveStrategy.DEBATE
+            # Simple code task — single-shot + one critic pass (REFINE), not full debate
+            logger.debug(
+                "cognitive_router.refine_simple",
+                node_id=node.id,
+                title=node.title,
+            )
+            return CognitiveStrategy.REFINE
 
         # 6. TESTER role → VERIFY (run deterministic checks after generation)
         if role == AgentRole.TESTER:

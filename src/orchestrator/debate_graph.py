@@ -102,24 +102,23 @@ the game goes to a Judge panel.
 """
 
 _CRITIC_SYSTEM = """\
-You are Player B in an adversarial code-review game. You are evaluating multiple candidate implementations (Graph of Thoughts).
-Your job is to merge the best parts of them, and then fiercely critique the resulting code.
+You are Player B in an adversarial code-review game. You are evaluating candidate implementations.
+Your job is to select the best candidate and fiercely critique it.
 
 Rules:
 1. Review all Coder implementations against the task and success criteria.
-2. Form a single `merged_code` that combines the best logic from all candidates.
-3. Write concrete FAILING unit tests that expose bugs in `merged_code`.
+2. Select the best candidate by number (best_candidate: 1, 2, ...).
+3. Write concrete FAILING unit tests that expose bugs in the chosen candidate.
 4. Identify edge cases, security issues, logic errors, and style violations.
-5. Assign a score from 0 to 10 for `merged_code`:
+5. Assign a score from 0 to 10 for the chosen candidate:
    - 0-4: Major bugs, non-functional, or fundamentally wrong approach
    - 5-7: Works for happy path but has significant gaps or edge cases
    - 8:   Minor nits only; nearly production-ready
    - 9-10: You cannot find a valid flaw — you CONCEDE
 
-Your FINAL_ANSWER MUST be exactly this JSON:
+Your FINAL_ANSWER MUST be exactly this JSON (no other fields, no code blocks):
 {
-  "merged_code": "<your chosen best or synthesized code>",
-  "resolved_issues": ["<what was fixed since last turn>"],
+  "best_candidate": <1 or 2>,
   "score": <int 0-10>,
   "reasoning": "<your critique — be specific, cite line numbers>",
   "failing_tests": ["<pytest test case 1>", "<pytest test case 2>"]
@@ -143,6 +142,25 @@ Output exactly:
   "correction_hint": "<if reject: exact instruction for the Coder>"
 }
 """
+
+
+def _repair_json(raw: str) -> dict | None:
+    """Try to salvage JSON from messy SLM output (stray text before/after braces, single quotes)."""
+    import json as _json
+    start = raw.find('{')
+    end = raw.rfind('}')
+    if start == -1 or end == -1 or end <= start:
+        return None
+    candidate = raw[start:end + 1]
+    try:
+        return _json.loads(candidate)
+    except _json.JSONDecodeError:
+        pass
+    try:
+        return _json.loads(candidate.replace("'", '"'))
+    except _json.JSONDecodeError:
+        pass
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -296,18 +314,20 @@ class DebateGraph:
                 max_turns=debate.max_turns,
             )
 
-        # Spawn 2 parallel GoT branches (critic will evaluate/merge candidates).
-        agent1 = CoderAgent() # type: ignore
-        agent2 = CoderAgent() # type: ignore
-        
-        sys1 = (_CODER_INITIAL_SYSTEM + "\nFocus heavily on robustness and error handling.") if debate.turn_count == 1 else extra
-        sys2 = (_CODER_INITIAL_SYSTEM + "\nFocus heavily on performance and clean architecture.") if debate.turn_count == 1 else extra
+        agent1 = CoderAgent()  # type: ignore
 
-        tasks = [
-            agent1.run(context=context, user_message=debate.task_description, extra_system=sys1),
-            agent2.run(context=context, user_message=debate.task_description, extra_system=sys2),
-        ]
-        results = await asyncio.gather(*tasks)
+        if debate.turn_count == 1:
+            # Turn 1: spawn 2 GoT branches — diverse initial approaches give the critic real signal
+            agent2 = CoderAgent()  # type: ignore
+            sys1 = _CODER_INITIAL_SYSTEM + "\nFocus heavily on robustness and error handling."
+            sys2 = _CODER_INITIAL_SYSTEM + "\nFocus heavily on performance and clean architecture."
+            results = await asyncio.gather(
+                agent1.run(context=context, user_message=debate.task_description, extra_system=sys1),
+                agent2.run(context=context, user_message=debate.task_description, extra_system=sys2),
+            )
+        else:
+            # Rebuttal turns: single focused coder — both branches would get identical critic feedback
+            results = [await agent1.run(context=context, user_message=debate.task_description, extra_system=extra)]
 
         tokens = sum(r.tokens_used for r in results)
         debate.tokens_used += tokens
@@ -360,7 +380,7 @@ class DebateGraph:
 
 {cands_str}
 
-Review the candidates above. Merge the best parts into `merged_code`. Write failing tests against it, assign a score.
+Select the best candidate, write failing tests against it, and assign a score.
 """
 
         result = await agent.run(
@@ -375,7 +395,7 @@ Review the candidates above. Merge the best parts into `merged_code`. Write fail
         score = 0
         reasoning = result.final_answer
         failing_tests: list[str] = []
-        merged_code = candidates[0]
+        chosen_code = candidates[0]
 
         try:
             raw = result.final_answer.strip()
@@ -386,34 +406,46 @@ Review the candidates above. Merge the best parts into `merged_code`. Write fail
             if raw.endswith("```"):
                 raw = raw[:-3]
             data = json.loads(raw.strip())
-            
-            merged_code = data.get("merged_code", candidates[0])
+
+            best_idx = max(0, min(len(candidates) - 1, int(data.get("best_candidate", 1)) - 1))
+            chosen_code = candidates[best_idx]
             score = max(0, min(10, int(data.get("score", 0))))
             reasoning = data.get("reasoning", result.final_answer)
             failing_tests = data.get("failing_tests", [])
-            resolved = data.get("resolved_issues", [])
-
-            if resolved:
-                history_add = "\n".join(f"- {r}" for r in resolved)
-                debate.compressed_history += f"\nTurn {debate.turn_count}:\n{history_add}\n"
 
             if score < debate.acceptance_threshold and not failing_tests and "line" not in reasoning.lower():
                 logger.warning("debate.critic_sycophancy_clamp", node_id=debate.node_id)
                 score = debate.acceptance_threshold
+            debate.json_parse_failures = 0  # clean parse — reset streak
         except Exception as exc:
             logger.warning("debate.critic_parse_error", error=str(exc))
             raw_fallback = result.final_answer
-            score_match = re.search(r'"score"\s*:\s*(\d+)', raw_fallback)
-            if score_match:
-                score = max(0, min(10, int(score_match.group(1))))
-                reasoning = (
-                    f"Critic JSON parse error, recovered score={score}. "
-                    f"Raw output: {raw_fallback}"
-                )
-            else:
-                score = 3
+            # Try JSON repair before falling back to regex
+            repaired = _repair_json(raw_fallback)
+            if repaired is not None:
+                try:
+                    best_idx = max(0, min(len(candidates) - 1, int(repaired.get("best_candidate", 1)) - 1))
+                    chosen_code = candidates[best_idx]
+                    score = max(0, min(10, int(repaired.get("score", 0))))
+                    reasoning = repaired.get("reasoning", raw_fallback)
+                    failing_tests = repaired.get("failing_tests", [])
+                    logger.info("debate.critic_json_repaired", node_id=debate.node_id, score=score)
+                    debate.json_parse_failures = 0  # repaired — reset streak
+                except Exception:
+                    repaired = None
+            if repaired is None:
+                debate.json_parse_failures += 1
+                score_match = re.search(r'"score"\s*:\s*(\d+)', raw_fallback)
+                if score_match:
+                    score = max(0, min(10, int(score_match.group(1))))
+                    reasoning = (
+                        f"Critic JSON parse error, recovered score={score}. "
+                        f"Raw output: {raw_fallback}"
+                    )
+                else:
+                    score = 3
 
-        debate.current_code = merged_code
+        debate.current_code = chosen_code
         debate.critic_score = score
         debate.critic_reasoning = reasoning
         debate.critic_failing_tests = failing_tests
@@ -514,6 +546,13 @@ Review the candidates above. Merge the best parts into `merged_code`. Write fail
             "deadlock"        → max_turns reached; send to Judge
         """
         if debate.critic_score >= debate.acceptance_threshold:
+            return "accept"
+        if debate.json_parse_failures >= 2:
+            logger.warning(
+                "debate.auto_accept_parse_failures",
+                node_id=debate.node_id,
+                failures=debate.json_parse_failures,
+            )
             return "accept"
         if debate.turn_count >= debate.max_turns:
             return "deadlock"
