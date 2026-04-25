@@ -257,7 +257,7 @@ class TestDebateGraphLoop:
             r.tool_trace = []
             return r
 
-        async def mock_critic_run(context, user_message, extra_system=None):
+        async def mock_critic_run(context, user_message, extra_system=None, **kwargs):
             nonlocal critic_call_count
             r = MagicMock()
             r.success = True
@@ -298,7 +298,7 @@ class TestDebateGraphLoop:
             r.tool_trace = []
             return r
 
-        async def mock_critic_run(context, user_message, extra_system=None):
+        async def mock_critic_run(context, user_message, extra_system=None, **kwargs):
             r = MagicMock()
             r.success = True
             r.final_answer = json.dumps({"score": 3, "reasoning": "Still broken", "failing_tests": []})
@@ -333,6 +333,44 @@ class TestDebateGraphLoop:
 
         assert debate.outcome in (DebateOutcome.CODER_WINS, DebateOutcome.DEADLOCK, DebateOutcome.ESCALATED)
         assert debate.turn_count <= 2
+
+    @pytest.mark.asyncio
+    async def test_malformed_critic_json_recovers_score(
+        self, simple_node: PlanNode, minimal_context: ContextPack
+    ) -> None:
+        """Malformed critic JSON should recover score and avoid forced low-score looping."""
+        from src.orchestrator.debate_graph import DebateGraph
+
+        async def mock_coder_run(context, user_message, extra_system=None, **kwargs):
+            r = MagicMock()
+            r.success = True
+            r.final_answer = "FINAL_ANSWER: print('Hello!')"
+            r.tokens_used = 80
+            r.tool_trace = []
+            return r
+
+        async def mock_critic_run(context, user_message, extra_system=None, **kwargs):
+            r = MagicMock()
+            r.success = True
+            # Intentionally malformed JSON (missing closing brace), but score is recoverable.
+            r.final_answer = '{"score": 8, "reasoning": "Looks good", "failing_tests": []'
+            r.tokens_used = 60
+            r.tool_trace = []
+            return r
+
+        with (
+            patch("src.orchestrator.debate_graph.CoderAgent") as MockCoder,
+            patch("src.orchestrator.debate_graph.CriticAgent") as MockCritic,
+        ):
+            MockCoder.return_value.run = mock_coder_run
+            MockCritic.return_value.run = mock_critic_run
+
+            graph = DebateGraph()
+            debate, _ = await graph.run(simple_node, minimal_context)
+
+        assert debate.critic_score == 8
+        assert debate.outcome == DebateOutcome.CODER_WINS
+        assert debate.turn_count == 1
 
 
 # ─────────────────────────────────────────────

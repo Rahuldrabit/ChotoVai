@@ -203,6 +203,7 @@ class AgenticValidator:
                 context=context_pack,
                 user_message=prompt,
                 extra_system=_SCORED_CRITIC_SYSTEM,
+                accept_plain_text_final=True,
             )
             raw = result.final_answer.strip()
             if raw.startswith("```"):

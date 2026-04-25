@@ -43,7 +43,7 @@ graph TD
     Tester[Tester Agent] -->|scratchpad_append\ncontracts_update| Scratchpad
     AgVal[AgenticValidator] -->|verdict to scratchpad| Scratchpad
 
-    Scratchpad -->|tail injected into every ContextPack| ContextAssembler[Context Assembler]
+    Scratchpad -->|tail injected into ContextPack (scoped by config)| ContextAssembler[Context Assembler]
     Contracts -->|compact summary injected| ContextAssembler
     ContextAssembler --> Coder
     ContextAssembler --> Critic
@@ -68,7 +68,7 @@ graph TD
 
 1. **Deterministic over probabilistic** — SLMs generate; compilers, linters, and test runners validate.
 2. **Adversarial convergence** — Coder and Critic run in a game-theoretic loop; confidence-scored ensemble escalates to a frontier model on disagreement.
-3. **External blackboard** — shared state lives outside any single context window. Agents write to a per-session scratchpad and contracts store; every agent reads a compact tail at invocation time.
+3. **External blackboard** — shared state lives outside any single context window. Agents write to a per-session scratchpad and contracts store; scratchpad tail injection into ContextPacks is **scoped by config** (recommended default: orchestrator-only for smaller SLM runtimes), while contracts are injected for all roles.
 4. **Dynamic decomposition** — broad nodes are split at runtime into 2–5 atomic child nodes by the `NodeDecomposer`, preserving DAG dependency correctness.
 5. **Fine-tuning decoupled** — debate traces are collected passively. The fine-tuning pipeline is intentionally disabled in the orchestration hot path.
 
@@ -82,7 +82,7 @@ All agents inherit `BaseAgent` which implements the **TAOR loop** (Think → Act
 
 | Agent | Role | Allowed Tools | Blackboard Access |
 |-------|------|---------------|-------------------|
-| **CoderAgent** | Primary code writer | read_file, write_file, grep, shell, run_tests, scratchpad_append, contracts_update, read_scratchpad | Full (read + write) |
+| **CoderAgent** | Primary code writer | read_file, write_file, grep, shell, run_tests, scratchpad_append, contracts_update | Write scratchpad + contracts; does not require scratchpad read in scoped mode |
 | **CriticAgent** | Code reviewer / SLM-as-Judge | read_file, grep, scratchpad_append, read_scratchpad | Read + write scratchpad |
 | **TesterAgent** | Test suite writer | read_file, write_file, grep, run_tests, scratchpad_append, contracts_update, read_scratchpad | Full (read + write) |
 | **ExplorerAgent** | Codebase traversal | code_graph, web_search, web_fetch, read_file, grep, scratchpad_append, read_scratchpad | Read + write scratchpad |

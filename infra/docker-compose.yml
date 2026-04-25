@@ -42,6 +42,25 @@ services:
       retries: 5
 
   # ──────────────────────────────────────────
+  # Graph DB (Neo4j)
+  # ──────────────────────────────────────────
+  neo4j:
+    image: neo4j:5
+    container_name: slm-neo4j
+    ports:
+      - "7474:7474"   # Browser/UI
+      - "7687:7687"   # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/neo4j
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ──────────────────────────────────────────
   # Observability — Langfuse (self-hosted)
   # ──────────────────────────────────────────
   langfuse:
@@ -102,5 +121,6 @@ services:
 volumes:
   postgres_data:
   qdrant_data:
+  neo4j_data:
   ollama_data:
   # hf_cache:  # Uncomment when using vLLM

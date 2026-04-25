@@ -125,6 +125,7 @@ class BaseAgent(ABC):
         user_message: str,
         extra_system: str | None = None,
         temperature: float | None = None,
+        accept_plain_text_final: bool = False,
     ) -> AgentResult:
         """
         Execute the TAOR loop for one invocation.
@@ -195,6 +196,31 @@ class BaseAgent(ABC):
 
             # ── ACT — parse & execute tool calls ──
             tool_call_matches = self._TOOL_CALL_RE.findall(content)
+
+            # Some callers (for example the debate critic) intentionally return
+            # raw JSON/text without FINAL_ANSWER markers.
+            if accept_plain_text_final and not tool_call_matches:
+                duration_ms = (time.perf_counter() - t0) * 1000
+                logger.info(
+                    "agent.done_plain_text",
+                    role=self.role.value,
+                    node=node_id,
+                    iterations=iterations,
+                    tool_calls=tool_calls_made,
+                    tokens=total_tokens,
+                    duration_ms=round(duration_ms),
+                )
+                return AgentResult(
+                    role=self.role,
+                    final_answer=content,
+                    messages=messages,
+                    tool_calls_made=tool_calls_made,
+                    tool_trace=tool_trace,
+                    tokens_used=total_tokens,
+                    iterations=iterations,
+                    duration_ms=duration_ms,
+                    success=True,
+                )
 
             if not tool_call_matches:
                 # No tool call and no FINAL_ANSWER → prompt the model to be explicit

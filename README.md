@@ -2,21 +2,20 @@
 
 A multi-agent coding assistant that scaffolds small open-weight models (Qwen2.5-Coder 7B, Llama-3-8B) into a robust, deterministic execution loop capable of handling complex software engineering tasks — without requiring frontier-model access.
 
-## Phase Delivery
+## 
+Currently implemented:
 
-Currently implemented: **Phase 8 — External Blackboard Memory**
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 0 | Foundation — schemas, config, tracing, vLLM client | ✓ |
-| 1 | Single-Agent Baseline — BaseAgent, MCP tools (read, write, grep, shell, tests) | ✓ |
-| 2 | Memory Layer — working buffer, episodic store, plan state, context assembler | ✓ |
-| 3 | Orchestrator & FSM — Planner, deterministic validators, FSM, CLI | ✓ |
-| 4 | Multi-Agent Swarm — specialized Tester, Explorer, Critic, Coder, Refactorer | ✓ |
-| 5 | Adversarial SLM Debate — debate graph loops, cognitive router, escalation | ✓ |
-| 6 | Multi-Path Reasoning — Tree of Thoughts for intent/planning, Graph of Thoughts for debate | ✓ |
-| 7 | Dynamic Node Decomposition — broad goals auto-split into atomic subtasks at runtime | ✓ |
-| 8 | External Blackboard Memory — session scratchpad + code contracts shared across all agents | ✓ |
+| Description |
+|-------------|
+| Foundation — schemas, config, tracing, vLLM client |
+| Single-Agent Baseline — BaseAgent, MCP tools (read, write, grep, shell, tests) |
+| Memory Layer — working buffer, episodic store, plan state, context assembler |
+| Orchestrator & FSM — Planner, deterministic validators, FSM, CLI |
+| Multi-Agent Swarm — specialized Tester, Explorer, Critic, Coder, Refactorer |
+| Adversarial SLM Debate — debate graph loops, cognitive router, escalation |
+| Multi-Path Reasoning — Tree of Thoughts for intent/planning, Graph of Thoughts for debate |
+| Dynamic Node Decomposition — broad goals auto-split into atomic subtasks at runtime |
+| External Blackboard Memory — session scratchpad + code contracts shared across all agents |
 
 **Also available:** VS Code extension (`chotovai-vscode/`) wrapping the agent system as a sidebar chat panel.
 
@@ -34,7 +33,7 @@ uv pip install -e .
 ### 2. Start infrastructure
 
 ```bash
-docker-compose -f infra/docker-compose.yml up -d postgres qdrant
+docker-compose -f infra/docker-compose.yml up -d postgres qdrant neo4j
 ```
 
 ### 3. Configure endpoints
@@ -95,7 +94,7 @@ bridge.py         NDJSON bridge between VS Code extension and AgentFSM
 
 **LLM-first routing with code extraction** — incoming goals are classified (TRIVIAL/MODERATE/COMPLEX) by a fast LLM classifier with fallback heuristics. Code blocks are extracted once and separated from natural language intent, preventing code patterns from confusing classification or intent analysis. Code is preserved as explicit context for downstream reasoning.
 
-**External Blackboard** — a per-session `scratchpad.md` (append-only reasoning log) and `contracts.json` (JSON symbol table) live outside the LLM context window. All agents read a tail/compact summary at invocation time and write back via `scratchpad_append`, `contracts_update`, and `read_scratchpad` MCP tools. This lets a chain of agents share state across a long session without any single call exceeding the context limit.
+**External Blackboard** — a per-session `scratchpad.md` (append-only reasoning log) and `contracts.json` (JSON symbol table) live outside the LLM context window. For smaller SLM runtimes, scratchpad tail injection into agent prompts is **scoped by config** (recommended: orchestrator-only), while contracts are injected for all roles. Agents write back via `scratchpad_append` and `contracts_update`, and roles that need it can query scratchpad via `read_scratchpad`.
 
 **Dynamic Decomposition** — the `CognitiveRouter` detects broad nodes (>80-word description, >3 success criteria, or multi-concept title) and routes them through `NodeDecomposer`, which calls the planner model to split the node into 2–5 atomic child nodes injected live into the running DAG.
 

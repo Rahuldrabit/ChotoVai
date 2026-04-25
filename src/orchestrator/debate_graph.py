@@ -20,6 +20,7 @@ Graph topology:
 from __future__ import annotations
 
 import time
+import re
 from datetime import datetime
 
 import structlog
@@ -362,7 +363,12 @@ class DebateGraph:
 Review the candidates above. Merge the best parts into `merged_code`. Write failing tests against it, assign a score.
 """
 
-        result = await agent.run(context=context, user_message=prompt, extra_system=_CRITIC_SYSTEM)
+        result = await agent.run(
+            context=context,
+            user_message=prompt,
+            extra_system=_CRITIC_SYSTEM,
+            accept_plain_text_final=True,
+        )
         tokens = result.tokens_used
         debate.tokens_used += tokens
 
@@ -396,7 +402,16 @@ Review the candidates above. Merge the best parts into `merged_code`. Write fail
                 score = debate.acceptance_threshold
         except Exception as exc:
             logger.warning("debate.critic_parse_error", error=str(exc))
-            score = 3
+            raw_fallback = result.final_answer
+            score_match = re.search(r'"score"\s*:\s*(\d+)', raw_fallback)
+            if score_match:
+                score = max(0, min(10, int(score_match.group(1))))
+                reasoning = (
+                    f"Critic JSON parse error, recovered score={score}. "
+                    f"Raw output: {raw_fallback}"
+                )
+            else:
+                score = 3
 
         debate.current_code = merged_code
         debate.critic_score = score

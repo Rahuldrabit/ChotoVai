@@ -111,7 +111,7 @@ class RepoIntelConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     graph_db_path: str = "./data/code_graph.kuzu"  # KuzuDB embedded
-    graph_db_backend: Literal["kuzu", "neo4j"] = "kuzu"
+    graph_db_backend: Literal["kuzu", "neo4j"] = "neo4j"
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "neo4j"

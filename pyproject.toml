@@ -35,7 +35,7 @@ dependencies = [
     "tree-sitter-java>=0.23.0",
 
     # Code graph — embedded graph DB
-    "kuzu>=0.6.0",
+    "neo4j>=5.25.0",
 
     # Embeddings
     "sentence-transformers>=3.1.0",

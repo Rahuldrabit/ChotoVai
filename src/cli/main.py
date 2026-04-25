@@ -157,6 +157,59 @@ def repl() -> None:
 
 
 @app.command()
+def setup(
+    provider: str = typer.Argument(None, help="Model provider (ollama, vllm, openrouter, azure_openai)"),
+    list_providers: bool = typer.Option(False, "--list", "-l", help="List available providers"),
+    copy_env: bool = typer.Option(False, "--copy-env", help="Copy .env template for this provider"),
+    output: str = typer.Option(".env", "--output", "-o", help="Output .env path"),
+) -> None:
+    """Configure API and model providers."""
+    from src.cli.setup import (
+        list_providers as list_providers_fn,
+        print_setup_instructions,
+        copy_env_template,
+        verify_provider_connectivity,
+        PROVIDERS,
+    )
+    
+    if list_providers or not provider:
+        console.print(Panel("[bold]Available Model Providers[/bold]", border_style="cyan"))
+        providers = list_providers_fn()
+        for name, info in providers.items():
+            console.print(f"\n[bold cyan]{name}[/bold cyan]: {info['name']}")
+            console.print(f"  [dim]{info['service_cmd']}[/dim]")
+            console.print(f"  [dim]Docs: {info['docs']}[/dim]")
+        
+        console.print(f"\n[info]Usage:[/info] slm-agent setup <provider> [--copy-env]")
+        return
+    
+    if provider not in PROVIDERS:
+        console.print(f"[error]Unknown provider: {provider}[/error]")
+        console.print(f"[info]Available:[/info] {', '.join(PROVIDERS.keys())}")
+        return
+    
+    # Show setup instructions
+    print_setup_instructions(provider)
+    
+    # Optionally copy .env
+    if copy_env:
+        try:
+            env_path = copy_env_template(provider, output)
+            console.print(f"\n[success]✓ Copied .env template to {env_path}[/success]")
+            console.print(f"[info]Next:[/info] Edit [cyan]{env_path}[/cyan] with your credentials/URLs")
+        except Exception as e:
+            console.print(f"[error]Failed to copy .env: {e}[/error]")
+        
+        # Try to verify connectivity
+        console.print()
+        console.print("[info]Checking connectivity...[/info]")
+        if verify_provider_connectivity(provider):
+            console.print(f"[success]✓ {provider} is reachable[/success]")
+        else:
+            console.print(f"[warn]⚠ {provider} not reachable (may not be running yet)[/warn]")
+
+
+@app.command()
 def doctor() -> None:
     """Check local configuration and connectivity (Codex-like setup sanity check)."""
     _setup()

@@ -46,18 +46,23 @@ class DeterministicValidator:
         Validate an in-memory string by writing it to a temporary file alongside the original.
         Useful for sandboxing parallel GoT coder outputs without corrupting the main codebase.
         """
-        import tempfile
         import os
         from pathlib import Path
 
         orig = Path(original_path)
-        # If original_path is a directory (e.g. "."), we can't reliably temp-wrap it here without copying.
-        if orig.is_dir():
-            # For dir-level validation of in-memory content, we fallback to standard validation.
-            logger.warning("validate_content called on a directory. Falling back to validate().")
-            return self.validate(original_path, run_tests)
 
-        temp_path = orig.with_name(f"{orig.stem}_tmp_{os.urandom(4).hex()}{orig.suffix}")
+        # Directory inputs are valid: write a temporary file in that directory
+        # and run validators on the file instead of the whole directory.
+        if orig.is_dir():
+            target_dir = orig
+            suffix = ".py"
+            stem = "_validate_content"
+        else:
+            target_dir = orig.parent if orig.parent != Path("") else Path(".")
+            suffix = orig.suffix or ".py"
+            stem = orig.stem or "_validate_content"
+
+        temp_path = target_dir / f"{stem}_tmp_{os.urandom(4).hex()}{suffix}"
         
         try:
             temp_path.write_text(content, encoding="utf-8")
