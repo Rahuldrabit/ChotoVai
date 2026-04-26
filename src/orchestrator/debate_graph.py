@@ -411,7 +411,12 @@ Select the best candidate, write failing tests against it, and assign a score.
             chosen_code = candidates[best_idx]
             score = max(0, min(10, int(data.get("score", 0))))
             reasoning = data.get("reasoning", result.final_answer)
-            failing_tests = data.get("failing_tests", [])
+            raw_ft = data.get("failing_tests", [])
+            # Coerce dicts to strings — model sometimes returns [{"test_name": "..."}] instead of ["..."]
+            failing_tests = [
+                t if isinstance(t, str) else (t.get("test_name") or t.get("name") or str(t))
+                for t in raw_ft
+            ]
 
             if score < debate.acceptance_threshold and not failing_tests and "line" not in reasoning.lower():
                 logger.warning("debate.critic_sycophancy_clamp", node_id=debate.node_id)

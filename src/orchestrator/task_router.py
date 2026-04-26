@@ -501,10 +501,13 @@ class TaskRouter:
                     ),
                     AgentMessage(role="user", content=nl_intent),
                 ],
-                max_tokens=5,
+                max_tokens=10,
                 temperature=0.0,
             )
-            word = resp.content.strip().lower().split()[0]
+            parts = resp.content.strip().lower().split()
+            if not parts:
+                return None
+            word = parts[0]
             logger.debug("task_router.model_classified", word=word)
             if word == "trivial":
                 return TaskComplexity.TRIVIAL

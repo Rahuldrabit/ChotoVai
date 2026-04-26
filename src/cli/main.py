@@ -1,5 +1,5 @@
 """
-CLI entry point — Rich-based TUI for the SLM coding agent.
+CLI entry point - Rich-based TUI for the SLM coding agent.
 """
 from __future__ import annotations
 
@@ -88,8 +88,8 @@ async def _async_run(goal: str, cwd: Path, verbose: bool) -> None:
 
             if etype == "routing":
                 tier = event.get("complexity", "?")
-                icons = {"trivial": "⚡", "moderate": "📋", "complex": "🔬"}
-                icon = icons.get(tier, "•")
+                icons = {"trivial": "[*]", "moderate": "[~]", "complex": "[+]"}
+                icon = icons.get(tier, "[?]")
                 status.update(f"[info]{icon} Complexity:[/info] {tier}")
 
             elif etype == "planning":
@@ -106,24 +106,24 @@ async def _async_run(goal: str, cwd: Path, verbose: bool) -> None:
                 status.update(f"[info]Executing:[/info] {event['title']} ({event['node_id']})")
 
             elif etype == "node_complete":
-                console.print(f"[success]✓[/success] {event['node_id']}: {event['summary'][:80]}")
+                console.print(f"[success]OK[/success] {event['node_id']}: {event['summary'][:80]}")
                 if event.get("files"):
                     for f in event["files"]:
-                        console.print(f"  [dim]→ {f}[/dim]")
+                        console.print(f"  [dim]-> {f}[/dim]")
                 if verbose:
                     _print_tool_trace(event.get("tools"))
                     _print_verify_trace(event.get("verify"))
 
             elif etype == "node_failed":
-                console.print(f"[error]✗[/error] {event['node_id']}: {event['error'][:100]}")
+                console.print(f"[error]FAIL[/error] {event['node_id']}: {event['error'][:100]}")
 
             elif etype == "node_retry":
-                console.print(f"[warn]↺[/warn] Retrying {event['node_id']} (attempt {event['attempt']})")
+                console.print(f"[warn]~>[/warn] Retrying {event['node_id']} (attempt {event['attempt']})")
 
             elif etype == "complete":
                 status.stop()
                 console.print(Panel(
-                    f"[success]✓ Done in {event['duration_s']}s — "
+                    f"[success]Done in {event['duration_s']}s - "
                     f"{event['nodes_completed']} nodes, {event['tokens_used']:,} tokens[/success]",
                     border_style="green",
                 ))
@@ -139,7 +139,7 @@ async def _async_run(goal: str, cwd: Path, verbose: bool) -> None:
 
 @app.command()
 def repl() -> None:
-    """Interactive REPL — enter goals one at a time."""
+    """Interactive REPL - enter goals one at a time."""
     _setup()
     console.print("[info]SLM Agent REPL[/info] (type 'exit' to quit)")
     while True:
@@ -195,7 +195,7 @@ def setup(
     if copy_env:
         try:
             env_path = copy_env_template(provider, output)
-            console.print(f"\n[success]✓ Copied .env template to {env_path}[/success]")
+            console.print(f"\n[success]OK Copied .env template to {env_path}[/success]")
             console.print(f"[info]Next:[/info] Edit [cyan]{env_path}[/cyan] with your credentials/URLs")
         except Exception as e:
             console.print(f"[error]Failed to copy .env: {e}[/error]")
@@ -204,9 +204,9 @@ def setup(
         console.print()
         console.print("[info]Checking connectivity...[/info]")
         if verify_provider_connectivity(provider):
-            console.print(f"[success]✓ {provider} is reachable[/success]")
+            console.print(f"[success]OK {provider} is reachable[/success]")
         else:
-            console.print(f"[warn]⚠ {provider} not reachable (may not be running yet)[/warn]")
+            console.print(f"[warn]WARN {provider} not reachable (may not be running yet)[/warn]")
 
 
 @app.command()
