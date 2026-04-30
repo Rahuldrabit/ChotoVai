@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from importlib.metadata import PackageNotFoundError as _PkgNotFound
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import typer
@@ -19,6 +21,25 @@ from src.core.config import get_config
 from src.core.tracing import setup_tracing
 
 app = typer.Typer(name="slm-agent", help="SLM-First Coding Agent System", add_completion=False)
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        try:
+            v = _pkg_version("slm-agent")
+        except _PkgNotFound:
+            v = "dev"
+        typer.echo(f"slm-agent {v}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _app_callback(
+    version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True, help="Show version and exit"
+    ),
+) -> None:
+    pass
 console = Console(theme=Theme({
     "success": "bold green",
     "error": "bold red",
@@ -66,12 +87,13 @@ def _setup() -> None:
 @app.command()
 def run(
     goal: str = typer.Argument(..., help="The coding task to accomplish"),
-    cwd: str = typer.Option(".", help="Working directory for file operations"),
+    cwd: str = typer.Option(None, help="Working directory (defaults to current shell directory)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed event stream"),
 ) -> None:
     """Run the SLM coding agent on a goal."""
     _setup()
-    asyncio.run(_async_run(goal, Path(cwd), verbose))
+    resolved_cwd = Path(cwd).resolve() if cwd else Path.cwd()
+    asyncio.run(_async_run(goal, resolved_cwd, verbose))
 
 
 async def _async_run(goal: str, cwd: Path, verbose: bool) -> None:
@@ -138,22 +160,186 @@ async def _async_run(goal: str, cwd: Path, verbose: bool) -> None:
 
 
 @app.command()
-def repl() -> None:
-    """Interactive REPL - enter goals one at a time."""
+def repl(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed event stream"),
+) -> None:
+    """Interactive REPL - enter goals one at a time. Supports cd, /help, /cwd."""
     _setup()
-    console.print("[info]SLM Agent REPL[/info] (type 'exit' to quit)")
+    cwd = Path.cwd()
+
+    console.print(Panel(
+        "[bold cyan]SLM Agent REPL[/bold cyan]\n"
+        "Type a coding goal, or use special commands:\n"
+        "  [dim]cd <path>[/dim]      change working directory\n"
+        "  [dim]/cwd[/dim]           show current directory\n"
+        "  [dim]/provider[/dim]      show active model config\n"
+        "  [dim]/help[/dim]          show this help\n"
+        "  [dim]exit[/dim]           quit",
+        border_style="cyan",
+    ))
+
     while True:
+        # Show last 2 path components to keep prompt compact
+        parts = cwd.parts
+        short = str(Path(*parts[-2:])) if len(parts) >= 2 else str(cwd)
         try:
-            goal = console.input("\n[cyan]>[/cyan] ").strip()
+            goal = console.input(f"\n[cyan]>[/cyan] [dim]({short})[/dim] ").strip()
         except (KeyboardInterrupt, EOFError):
             break
-        if goal.lower() in ("exit", "quit", "q"):
-            break
+
         if not goal:
             continue
-        asyncio.run(_async_run(goal, Path("."), verbose=False))
+
+        if goal.lower() in ("exit", "quit", "q"):
+            break
+
+        # ── cd command ────────────────────────────────────────────────────
+        if goal.lower().startswith("cd "):
+            target = goal[3:].strip()
+            new_path = Path(target) if Path(target).is_absolute() else (cwd / target)
+            new_path = new_path.resolve()
+            if new_path.is_dir():
+                cwd = new_path
+                console.print(f"[info]cwd:[/info] {cwd}")
+            else:
+                console.print(f"[error]Not a directory: {new_path}[/error]")
+            continue
+
+        # ── /cwd ──────────────────────────────────────────────────────────
+        if goal.lower() == "/cwd":
+            console.print(f"[info]cwd:[/info] {cwd}")
+            continue
+
+        # ── /help ─────────────────────────────────────────────────────────
+        if goal.lower() == "/help":
+            console.print(
+                "  [cyan]cd <path>[/cyan]     change working directory\n"
+                "  [cyan]/cwd[/cyan]          show current directory\n"
+                "  [cyan]/provider[/cyan]     show active model config\n"
+                "  [cyan]exit[/cyan]          quit"
+            )
+            continue
+
+        # ── /provider ─────────────────────────────────────────────────────
+        if goal.lower() == "/provider":
+            cfg = get_config()
+            console.print(f"  orchestrator: [cyan]{cfg.models.orchestrator.base_url}[/cyan] / {cfg.models.orchestrator.model_name}")
+            console.print(f"  coder:        [cyan]{cfg.models.coder.base_url}[/cyan] / {cfg.models.coder.model_name}")
+            console.print(f"  critic:       [cyan]{cfg.models.critic.base_url}[/cyan] / {cfg.models.critic.model_name}")
+            continue
+
+        # ── Normal goal ───────────────────────────────────────────────────
+        asyncio.run(_async_run(goal, cwd, verbose=verbose))
 
     console.print("Goodbye.")
+
+
+def _do_copy_env(
+    provider: str,
+    env_path: Path,
+    api_key: str | None,
+    copy_env_fn,
+) -> None:
+    """Copy provider .env template and optionally patch in an API key."""
+    try:
+        result = copy_env_fn(provider, env_path)
+        console.print(f"[success]OK[/success] Copied .env template to [cyan]{result}[/cyan]")
+        if api_key and provider == "openrouter":
+            import re
+            text = env_path.read_text(encoding="utf-8")
+            text = re.sub(r"sk-or-[A-Z_]+", api_key, text)
+            env_path.write_text(text, encoding="utf-8")
+            console.print("[success]OK[/success] API key written to .env")
+    except Exception as e:
+        console.print(f"[error]Failed to copy .env: {e}[/error]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def init() -> None:
+    """First-run wizard: pick a provider, copy .env template, run doctor."""
+    from src.cli.setup import (
+        copy_env_template,
+        verify_provider_connectivity,
+        PROVIDERS,
+    )
+
+    console.print(Panel(
+        "[bold cyan]Welcome to ChotoVai SLM Agent[/bold cyan]\n\n"
+        "This wizard will configure your model provider.\n"
+        "It takes about 2 minutes.",
+        title="[info]slm-agent init[/info]",
+        border_style="cyan",
+    ))
+
+    # ── Provider selection ────────────────────────────────────────────────
+    provider_list = list(PROVIDERS.keys())
+    console.print("\n[info]Available providers:[/info]")
+    for i, name in enumerate(provider_list, 1):
+        info = PROVIDERS[name]
+        console.print(f"  [bold]{i}.[/bold] [cyan]{name}[/cyan] — {info['name']}")
+
+    choice = typer.prompt("\nEnter provider name or number", default="lmstudio")
+
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(provider_list):
+            provider = provider_list[idx]
+        else:
+            console.print(f"[error]Invalid number: {choice}[/error]")
+            raise typer.Exit(1)
+    elif choice in PROVIDERS:
+        provider = choice
+    else:
+        console.print(f"[error]Unknown provider: {choice}[/error]")
+        console.print(f"[info]Available:[/info] {', '.join(PROVIDERS.keys())}")
+        raise typer.Exit(1)
+
+    console.print(f"\n[success]Selected:[/success] {PROVIDERS[provider]['name']}")
+
+    # ── API key prompt (cloud providers only) ────────────────────────────
+    api_key: str | None = None
+    if provider == "openrouter":
+        api_key = typer.prompt("Enter your OpenRouter API key (sk-or-...)", hide_input=True)
+
+    # ── Copy .env template ────────────────────────────────────────────────
+    env_path = Path(".env")
+    if env_path.exists():
+        overwrite = typer.confirm(
+            f"\n.env already exists at {env_path.resolve()}. Overwrite?",
+            default=False,
+        )
+        if not overwrite:
+            console.print("[info]Keeping existing .env — skipping copy.[/info]")
+        else:
+            _do_copy_env(provider, env_path, api_key, copy_env_template)
+    else:
+        _do_copy_env(provider, env_path, api_key, copy_env_template)
+
+    # ── Next steps ────────────────────────────────────────────────────────
+    service_cmd = PROVIDERS[provider]["service_cmd"]
+    docs = PROVIDERS[provider]["docs"]
+    console.print(Panel(
+        f"[bold]Next steps:[/bold]\n\n"
+        f"1. Start your model server:\n"
+        f"   [cyan]{service_cmd}[/cyan]\n\n"
+        f"2. Review [cyan].env[/cyan] and adjust model names if needed\n\n"
+        f"3. Start coding:\n"
+        f"   [cyan]slm-agent repl[/cyan]\n\n"
+        f"Docs: [dim]{docs}[/dim]",
+        title="[success]Setup complete[/success]",
+        border_style="green",
+    ))
+
+    # ── Quick connectivity check ──────────────────────────────────────────
+    console.print("\n[info]Checking connectivity...[/info]")
+    if verify_provider_connectivity(provider):
+        console.print(f"[success]OK[/success] {provider} is reachable — you're ready to go!")
+    else:
+        console.print(
+            f"[warn]WARN[/warn] {provider} not reachable yet.\n"
+            f"  Start the server first, then run [cyan]slm-agent doctor[/cyan] to verify."
+        )
 
 
 @app.command()

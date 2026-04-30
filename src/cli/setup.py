@@ -20,6 +20,12 @@ PROVIDERS = {
         "status_check": "http://localhost:11434/v1/models",
         "docs": "https://ollama.ai",
     },
+    "lmstudio": {
+        "name": "LM Studio (Local GUI Server)",
+        "service_cmd": "Start from LM Studio GUI → Local Server tab",
+        "status_check": "http://localhost:1234/v1/models",
+        "docs": "https://lmstudio.ai",
+    },
     "vllm": {
         "name": "vLLM (High-Performance)",
         "service_cmd": "vllm serve meta-llama/Llama-3-70b-chat-hf --host 0.0.0.0 --port 8000",

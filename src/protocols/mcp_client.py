@@ -17,6 +17,7 @@ logger = structlog.get_logger(__name__)
 # Tool implementations imported here — keeps agents clean
 from tools.read_file import read_file
 from tools.write_file import write_file
+from tools.patch_file import patch_file
 from tools.grep import grep
 from tools.shell import shell
 from tools.run_tests import run_tests
@@ -41,6 +42,7 @@ from tools.read_scratchpad import read_scratchpad
 _TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "read_file": read_file,
     "write_file": write_file,
+    "patch_file": patch_file,
     "grep": grep,
     "shell": shell,
     "run_tests": run_tests,
@@ -71,6 +73,7 @@ def _needs_approval(tool_name: str) -> bool:
     # Side-effect tools (write, commands, VCS/PR actions).
     return tool_name in {
         "write_file",
+        "patch_file",
         "shell",
         "git_branch_create",
         "git_commit",

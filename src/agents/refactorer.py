@@ -22,7 +22,7 @@ Rules:
 2. Call `read_scratchpad` with query_type="by_role" role="coder" to check if the Coder already
    registered a contract for the class or function you are about to touch.
 3. Plan your changes. Do not change business logic — only the structure/naming/framework as requested.
-4. Apply changes systematically using `write_file`.
+4. Apply changes using `patch_file` (unified diff) for partial edits, or `write_file` only when rewriting an entire file from scratch.
 5. Run deterministic validation (e.g., `run_tests` or `run_lint`) to ensure the refactor is safe.
 6. If tests fail, revert or fix your changes immediately.
 7. After refactoring a class or function signature, call `contracts_update` to register the NEW
@@ -38,7 +38,7 @@ Output format:
 
     def allowed_tools(self) -> list[str]:
         return [
-            "read_file", "write_file", "grep", "run_tests", "shell",
+            "read_file", "write_file", "patch_file", "grep", "run_tests", "shell",
             "scratchpad_append", "contracts_update", "read_scratchpad",
         ]
 

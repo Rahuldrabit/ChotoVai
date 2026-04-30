@@ -27,7 +27,7 @@ Rules:
 7. After writing, verify your changes compile or run correctly using shell or run_tests.
 8. Do NOT refactor code outside the scope of your task.
 9. Do NOT leave TODOs or placeholder code.
-10. Emit a complete, unified diff or the final file content when finished.
+10. When editing existing files, prefer `patch_file` with a unified diff over `write_file` — it is safer for large files and avoids overwriting unchanged code. Use `write_file` only when creating a new file or doing a full rewrite.
 
 Output format:
 - To call a tool: ```json {"tool": "<name>", "arguments": {<args>}} ```
@@ -36,7 +36,7 @@ Output format:
 
     def allowed_tools(self) -> list[str]:
         return [
-            "read_file", "write_file", "grep", "shell", "run_tests",
+            "read_file", "write_file", "patch_file", "grep", "shell", "run_tests",
             "scratchpad_append", "contracts_update",
         ]
 
